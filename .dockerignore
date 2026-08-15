@@ -1,0 +1,32 @@
+# Frontend
+node_modules/
+frontend/node_modules/
+frontend/dist/
+frontend/.env
+frontend/.env.local
+
+# Python
+backend/.venv/
+backend/static/
+__pycache__/
+*.py[cod]
+.ruff_cache/
+.pytest_cache/
+*.egg-info/
+
+# Data (runtime)
+data/
+!data/curated/
+!data/curated/.gitkeep
+
+# Environment
+.env
+.env.local
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+
+# Logs
+*.log
