@@ -3,25 +3,25 @@ import { test, expect } from "@playwright/test";
 import { loginAsLearner, loginAsParent } from "./helpers";
 
 const FIXTURE_CSV = `word,definition,level,category
-mango,Sweet tropical fruit,A2,Food
-kiwi,Small green fruit,A2,Food
-tiger,A big striped cat,A2,Animals / nature
-panda,Black and white bear,A2,Animals / nature
-giraffe,Tall animal with long neck,A2,Animals / nature
-rvs6,Meaning six,A2,General
-rvs7,Meaning seven,A2,General
-rvs8,Meaning eight,A2,General
-rvs9,Meaning nine,A2,General
-rvs10,Meaning ten,A2,General
+mango,Sweet tropical fruit,B1,Food
+kiwi,Small green fruit,B1,Food
+tiger,A big striped cat,B1,Animals / nature
+panda,Black and white bear,B1,Animals / nature
+giraffe,Tall animal with long neck,B1,Animals / nature
+rvs6,Meaning six,B1,General
+rvs7,Meaning seven,B1,General
+rvs8,Meaning eight,B1,General
+rvs9,Meaning nine,B1,General
+rvs10,Meaning ten,B1,General
 `;
 
 function normalizeDefinition(text: string): string {
   return text.trim().toLowerCase().replace(/\s+/g, " ");
 }
 
-async function leoAuth(page: import("@playwright/test").Page) {
+async function miaAuth(page: import("@playwright/test").Page) {
   const login = await page.request.post("/api/v1/auth/login", {
-    data: { username: "leo", password: "leo" },
+    data: { username: "mia", password: "mia" },
   });
   expect(login.ok()).toBeTruthy();
   const { access_token: token } = (await login.json()) as { access_token: string };
@@ -43,7 +43,7 @@ async function seedDueCards(page: import("@playwright/test").Page) {
   });
   await expect(page.getByText(/Imported/i)).toBeVisible({ timeout: 15000 });
 
-  const auth = await leoAuth(page);
+  const auth = await miaAuth(page);
   const mix = await page.request.get("/api/v1/loop/today", { headers: auth });
   expect(mix.ok()).toBeTruthy();
 
@@ -56,7 +56,7 @@ async function seedDueCards(page: import("@playwright/test").Page) {
 }
 
 async function getFirstDueDefinition(page: import("@playwright/test").Page) {
-  const auth = await leoAuth(page);
+  const auth = await miaAuth(page);
   const due = await page.request.get("/api/v1/reviews/due", { headers: auth });
   expect(due.ok()).toBeTruthy();
   const cards = (await due.json()).cards as Array<{
@@ -73,7 +73,7 @@ test.describe("SRS review", () => {
 
   test("wrong pick shows feedback and waits for Continue before advancing", async ({ page }) => {
     const correctDefinition = await getFirstDueDefinition(page);
-    await loginAsLearner(page, "Leo");
+    await loginAsLearner(page, "Mia");
 
     await page.goto("/app/review");
     await expect(page.getByRole("heading", { name: /Choose words/i })).toBeVisible();
