@@ -875,7 +875,18 @@ async def regenerate_daily_mix(
         log.mastered_retention_count = 0
         log.source_kind = source_kind
         log.source_ref = source_ref
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError:
+        # Concurrent request created today's log first — reload and reuse it.
+        await db.rollback()
+        log_result = await db.execute(
+            select(DailyChallengeLog).where(
+                DailyChallengeLog.learner_id == learner.id,
+                DailyChallengeLog.challenge_date == today,
+            )
+        )
+        log = log_result.scalar_one()
 
     shuffle_salt = int(now.timestamp())
     return await build_daily_mix(

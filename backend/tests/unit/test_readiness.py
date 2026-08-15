@@ -191,9 +191,10 @@ async def test_should_suggest_requires_ready_threshold(db_session) -> None:
             assert result["should_suggest"] is False
     else:
         assert result["should_suggest"] is False
-        assert "continue practicing" in (result["reason"] or "").lower() or "not enough" in (
-            result["reason"] or ""
-        ).lower()
+        assert (
+            "continue practicing" in (result["reason"] or "").lower()
+            or "not enough" in (result["reason"] or "").lower()
+        )
 
 
 @pytest.mark.asyncio
