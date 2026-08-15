@@ -1,5 +1,7 @@
 # myvocabulary
 
+[![CI](https://github.com/hkdad/myvocabulary/actions/workflows/ci.yml/badge.svg)](https://github.com/hkdad/myvocabulary/actions/workflows/ci.yml)
+
 Family vocabulary learning and dictionary app for kids — React frontend, FastAPI backend, SQLite.
 
 ## Quick start (local development)
