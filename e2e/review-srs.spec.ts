@@ -3,16 +3,16 @@ import { test, expect } from "@playwright/test";
 import { loginAsLearner, loginAsParent } from "./helpers";
 
 const FIXTURE_CSV = `word,definition,level,category
-apple,A round fruit,A2,Food
-banana,Yellow fruit,A2,Food
-cat,A small animal,A2,Animals / nature
-dog,A loyal pet,A2,Animals / nature
-easy,Easy word,A2,General
-term6,Meaning six,A2,General
-term7,Meaning seven,A2,General
-term8,Meaning eight,A2,General
-term9,Meaning nine,A2,General
-term10,Meaning ten,A2,General
+mango,Sweet tropical fruit,A2,Food
+kiwi,Small green fruit,A2,Food
+tiger,A big striped cat,A2,Animals / nature
+panda,Black and white bear,A2,Animals / nature
+giraffe,Tall animal with long neck,A2,Animals / nature
+rvs6,Meaning six,A2,General
+rvs7,Meaning seven,A2,General
+rvs8,Meaning eight,A2,General
+rvs9,Meaning nine,A2,General
+rvs10,Meaning ten,A2,General
 `;
 
 function normalizeDefinition(text: string): string {
