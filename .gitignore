@@ -140,10 +140,6 @@ celerybeat.pid
 # RabbitMQ
 mnesia/
 rabbitmq/
-rabbitmq-data/
-
-# ActiveMQ
-activemq-data/
 
 # SageMath parsed files
 *.sage.py
@@ -224,20 +220,17 @@ __marimo__/
 
 # Node / frontend
 node_modules/
-frontend/dist/
-frontend/.env
 frontend/.env.local
 
 # Python backend
-backend/.venv/
 backend/static/
-.ruff_cache/
 
 # Runtime data (keep curated templates)
 data/*
 !data/curated/
 !data/curated/**
 backend/data/
+logs/
 .pnpm-store/
 e2e/test-results/
 e2e/playwright-report/
