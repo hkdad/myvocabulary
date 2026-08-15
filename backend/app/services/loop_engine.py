@@ -796,10 +796,11 @@ async def regenerate_daily_mix(
     if now is None:
         now = datetime.now(UTC)
     today = now.date()
+    learner_id = learner.id  # cache scalar — session objects get expired on rollback
 
     log_result = await db.execute(
         select(DailyChallengeLog).where(
-            DailyChallengeLog.learner_id == learner.id,
+            DailyChallengeLog.learner_id == learner_id,
             DailyChallengeLog.challenge_date == today,
         )
     )
@@ -882,7 +883,7 @@ async def regenerate_daily_mix(
         await db.rollback()
         log_result = await db.execute(
             select(DailyChallengeLog).where(
-                DailyChallengeLog.learner_id == learner.id,
+                DailyChallengeLog.learner_id == learner_id,
                 DailyChallengeLog.challenge_date == today,
             )
         )
@@ -923,6 +924,7 @@ async def build_daily_mix(
 
     await reconcile_mismatched_bank_cards(db, learner=learner, parent_id=parent_id, now=now)
 
+    learner_id = learner.id  # cache scalar — session objects get expired on rollback
     new_goal = learner.daily_new_word_goal or default_new_goal(learner)
     learning_retention_goal = daily_learning_retention_goal(learner)
     mastered_retention_goal = daily_mastered_retention_goal(learner)
@@ -931,7 +933,7 @@ async def build_daily_mix(
     challenge_date = now.date()
     log_result = await db.execute(
         select(DailyChallengeLog).where(
-            DailyChallengeLog.learner_id == learner.id,
+            DailyChallengeLog.learner_id == learner_id,
             DailyChallengeLog.challenge_date == challenge_date,
         )
     )
@@ -1066,7 +1068,7 @@ async def build_daily_mix(
                 await db.rollback()
                 log_result = await db.execute(
                     select(DailyChallengeLog).where(
-                        DailyChallengeLog.learner_id == learner.id,
+                        DailyChallengeLog.learner_id == learner_id,
                         DailyChallengeLog.challenge_date == challenge_date,
                     )
                 )
