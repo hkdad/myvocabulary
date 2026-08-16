@@ -137,9 +137,7 @@ async def get_learner_quests(
     parent: User = Depends(require_parent),
     db: AsyncSession = Depends(get_db),
 ) -> QuestsSummaryResponse:
-    data = await achievement_service.get_quests_summary(
-        db, learner=learner, parent_id=parent.id
-    )
+    data = await achievement_service.get_quests_summary(db, learner=learner, parent_id=parent.id)
     data["newly_earned_badges"] = []
     return QuestsSummaryResponse(**data)
 
