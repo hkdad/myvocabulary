@@ -332,6 +332,26 @@ async def count_released_today(db: AsyncSession, learner_id: int, now: datetime)
     return result.scalar_one()
 
 
+async def _entry_ids_at_learner_level(
+    db: AsyncSession, *, learner: Learner, parent_id: int
+) -> set[int]:
+    """Family-bank dictionary entry IDs at the learner's current CEFR."""
+    bank = await get_family_bank(db, parent_id)
+    if bank is None:
+        return set()
+
+    result = await db.execute(
+        select(WordListItem.dictionary_entry_id, WordListItem.level).where(
+            WordListItem.word_list_id == bank.id
+        )
+    )
+    return {
+        entry_id
+        for entry_id, item_level in result.all()
+        if level_matches(item_level, learner.english_level)
+    }
+
+
 async def _bank_items_for_learner(
     db: AsyncSession, learner: Learner, parent_id: int
 ) -> list[WordListItem]:
@@ -988,13 +1008,19 @@ async def build_daily_mix(
             strength_in={"learning", "familiar"},
         )
         learning_picked_ids = {card.id for card in learning_retention_cards if card.id is not None}
+        current_level_ids = await _entry_ids_at_learner_level(
+            db, learner=learner, parent_id=parent_id
+        )
+        mastered_allowlist = current_level_ids
+        if entry_id_allowlist is not None:
+            mastered_allowlist = entry_id_allowlist & current_level_ids
         mastered_retention_cards = await pick_retention(
             db,
             learner=learner,
             limit=mastered_retention_goal,
             now=now,
             exclude_ids=learning_picked_ids,
-            entry_id_allowlist=entry_id_allowlist,
+            entry_id_allowlist=mastered_allowlist,
             strength_in={"mastered"},
         )
         # Prefer retention that is NOT part of today's freshest new drip when possible.

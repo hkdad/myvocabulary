@@ -3,11 +3,12 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from httpx import AsyncClient
+from sqlalchemy import select
 
 from app.core.sm2 import DEFAULT_EASE_FACTOR
 from app.models.dictionary import DictionaryEntry
 from app.models.learner import Learner
-from app.models.srs import SrsCard
+from app.models.srs import SrsCard, SrsReviewLog
 from app.services import loop_engine
 
 
@@ -18,6 +19,60 @@ async def _login(client: AsyncClient, username: str, password: str) -> str:
     )
     assert response.status_code == 200
     return response.json()["access_token"]
+
+
+async def _due_card_with_strength(
+    db_session,
+    *,
+    learner_id: int,
+    entry_id: int,
+    word_list_id: int | None,
+    now: datetime,
+    distinct_days: int,
+) -> SrsCard:
+    """Released, due card with N distinct correct review days (sets last_reviewed_at)."""
+    result = await db_session.execute(
+        select(SrsCard).where(
+            SrsCard.learner_id == learner_id,
+            SrsCard.dictionary_entry_id == entry_id,
+        )
+    )
+    card = result.scalar_one_or_none()
+    if card is None:
+        card = SrsCard(
+            learner_id=learner_id,
+            dictionary_entry_id=entry_id,
+            word_list_id=word_list_id,
+            ease_factor=DEFAULT_EASE_FACTOR,
+            interval_days=10,
+            repetitions=distinct_days,
+            due_at=now - timedelta(hours=1),
+            state="review",
+            released_at=now - timedelta(days=10),
+            last_reviewed_at=now - timedelta(hours=2),
+        )
+        db_session.add(card)
+        await db_session.flush()
+    else:
+        card.word_list_id = word_list_id or card.word_list_id
+        card.ease_factor = DEFAULT_EASE_FACTOR
+        card.interval_days = 10
+        card.repetitions = distinct_days
+        card.due_at = now - timedelta(hours=1)
+        card.state = "review"
+        card.released_at = now - timedelta(days=10)
+        card.last_reviewed_at = now - timedelta(hours=2)
+
+    for day_offset in range(distinct_days, 0, -1):
+        db_session.add(
+            SrsReviewLog(
+                srs_card_id=card.id,
+                learner_id=learner_id,
+                quality=4,
+                reviewed_at=now - timedelta(days=day_offset),
+            )
+        )
+    return card
 
 
 async def _complete_listen_and_pick(client: AsyncClient, token: str) -> None:
@@ -811,6 +866,117 @@ async def test_progress_summary_counts(db_session) -> None:
     )
     assert summary["familiar_count"] == level_counts["familiar"]
     assert summary["familiar_count"] >= 1
+
+
+@pytest.mark.asyncio
+async def test_daily_mix_mastered_is_current_level_only(client: AsyncClient, db_session) -> None:
+    """Mastered slot is current CEFR; learning/familiar may be any released level."""
+    parent_token = await _login(client, "parent", "parent123")
+    csv_content = (
+        "word,definition,level,category\n"
+        "a1mastered,A1 mastered,A1,General\n"
+        "a1familiar,A1 familiar,A1,General\n"
+        "a2mastered,A2 mastered,A2,General\n"
+        "b1familiar,B1 familiar,B1,General\n"
+        + "".join(f"a2new{i},A2 new {i},A2,General\n" for i in range(1, 9))
+    )
+    imported = await client.post(
+        "/api/v1/word-bank/import",
+        headers={"Authorization": f"Bearer {parent_token}"},
+        files={"file": ("bank.csv", io.BytesIO(csv_content.encode()), "text/csv")},
+    )
+    assert imported.status_code == 200
+
+    learner = (
+        await db_session.execute(select(Learner).where(Learner.display_name == "Leo"))
+    ).scalar_one()
+    learner.english_level = "A2"
+    await db_session.commit()
+
+    parent_id = await loop_engine.get_learner_parent_id(db_session, learner)
+    assert parent_id is not None
+    bank = await loop_engine.get_family_bank(db_session, parent_id)
+    assert bank is not None
+
+    entries = {
+        entry.word: entry
+        for entry in (
+            await db_session.execute(
+                select(DictionaryEntry).where(
+                    DictionaryEntry.word.in_(
+                        ["a1mastered", "a1familiar", "a2mastered", "b1familiar"]
+                    )
+                )
+            )
+        )
+        .scalars()
+        .all()
+    }
+    now = datetime.now(UTC)
+    a1_mastered = await _due_card_with_strength(
+        db_session,
+        learner_id=learner.id,
+        entry_id=entries["a1mastered"].id,
+        word_list_id=bank.id,
+        now=now,
+        distinct_days=3,
+    )
+    a2_mastered = await _due_card_with_strength(
+        db_session,
+        learner_id=learner.id,
+        entry_id=entries["a2mastered"].id,
+        word_list_id=bank.id,
+        now=now,
+        distinct_days=3,
+    )
+    a1_familiar = await _due_card_with_strength(
+        db_session,
+        learner_id=learner.id,
+        entry_id=entries["a1familiar"].id,
+        word_list_id=bank.id,
+        now=now,
+        distinct_days=2,
+    )
+    b1_familiar = await _due_card_with_strength(
+        db_session,
+        learner_id=learner.id,
+        entry_id=entries["b1familiar"].id,
+        word_list_id=bank.id,
+        now=now,
+        distinct_days=2,
+    )
+    await db_session.commit()
+
+    current_level_ids = await loop_engine._entry_ids_at_learner_level(
+        db_session, learner=learner, parent_id=parent_id
+    )
+    mastered_cards = await loop_engine.pick_retention(
+        db_session,
+        learner=learner,
+        limit=1,
+        now=now,
+        entry_id_allowlist=current_level_ids,
+        strength_in={"mastered"},
+    )
+    assert [card.id for card in mastered_cards] == [a2_mastered.id]
+
+    learning_cards = await loop_engine.pick_retention(
+        db_session,
+        learner=learner,
+        limit=1,
+        now=now,
+        strength_in={"learning", "familiar"},
+    )
+    assert len(learning_cards) == 1
+    assert learning_cards[0].id in {a1_familiar.id, b1_familiar.id}
+
+    mix = await loop_engine.build_daily_mix(
+        db_session, learner=learner, parent_id=parent_id, now=now
+    )
+    mix_ids = {card["id"] for card in mix["cards"]}
+    assert a2_mastered.id in mix_ids
+    assert a1_mastered.id not in mix_ids
+    assert mix_ids & {a1_familiar.id, b1_familiar.id}
 
 
 @pytest.mark.asyncio
