@@ -211,7 +211,7 @@ The Loop Engine is the Phase 2 core. It sits above SM-2 and decides **what enter
 
 | Responsibility | Behavior |
 |----------------|----------|
-| Level filter | Only offer bank words at learner’s current CEFR (and below for retention) |
+| Level filter | New + mastered: current CEFR. Learning/familiar retention: any released level |
 | New-word drip | Release at most `daily_new_word_goal` new cards/day |
 | Retention mix | Include up to 2 rare-retention / weak cards in the daily soft session |
 | Strength | Derive Learning / Familiar / Mastered from SRS fields |
@@ -264,11 +264,12 @@ SM-2 (`due_at`, intervals) still controls **when** a card is eligible; strength 
 Input: learner, `now`, goals, family bank.
 
 1. **Learning/familiar retention picks (up to `daily_learning_retention_mix`, default 1)**
-   - Due cards with strength Learning or Familiar
+   - Due cards with strength Learning or Familiar (any released CEFR, including higher)
    - Else filler from released cards in that strength band
 2. **Mastered retention picks (up to `daily_mastered_retention_mix`, default 1)**
-   - Due cards with strength Mastered
+   - Due cards with strength Mastered **at the learner’s current CEFR only**
    - Exclude IDs already picked in step 1
+   - Do not fall back to other-level mastered; empty pool uses new-drip stand-ins
 3. **New picks (up to `daily_new_word_goal`)**
    - Count already released today
    - Release remaining quota from bank items at learner level not yet released
@@ -490,7 +491,7 @@ flowchart TD
 |------|-------|
 | `derive_strength` | Distinct-day boundaries 1 / 2 / 3 |
 | `release_new_words` | Caps at goal; level filter; idempotent same day |
-| `pick_retention` | Splits learning/familiar vs mastered pools; returns &lt;goal if sparse |
+| `pick_retention` | Splits learning/familiar vs mastered pools; mastered current-CEFR only |
 | `build_daily_mix` | Kid 5+1+1, teen 8+1+1; empty bank; all mastered |
 | CSV parse | Happy path, missing columns, placeholder rows, bad level |
 
@@ -516,7 +517,7 @@ New Playwright file: `e2e/learning-loop.spec.ts` (name flexible).
 | E4 | Complete soft challenge | Start CTA → finish session → home | Completed / streak affordance |
 | E5 | Progress visible (kid) | Open progress/home stats | Learning/Familiar/Mastered counts render |
 | E6 | Progress visible (parent) | Parent dashboard for Leo | Same buckets + level A1 |
-| E7 | Level isolation | Mia/Leo both A1; bank has B1 words | Daily mix words are A1 only |
+| E7 | Level isolation | Mia/Leo both A1; bank has B1 words | New + mastered are A1; unreleased B1 stays out |
 | E8 | Teen quota | Mia daily mix | New cap 8 (or teen default) |
 
 E2E must run in CI with existing `make test-e2e` / Playwright job. Prefer API helpers for seed/import speed; UI assertions for parent upload + learner home.
