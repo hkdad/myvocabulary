@@ -241,3 +241,69 @@ async def test_quests_multi_level_strength_and_pack_counts(client, db_session) -
 
     food_pack = next(p for p in data["packs"] if p["slug"] == "food")
     assert food_pack["strong_words"] >= 3
+
+
+@pytest.mark.asyncio
+async def test_parent_can_view_learner_quests(client, db_session) -> None:
+    from sqlalchemy import select
+
+    parent_token = await _login(client, "parent", "parent123")
+    leo = (
+        await db_session.execute(select(Learner).where(Learner.display_name == "Leo"))
+    ).scalar_one()
+
+    bank = WordList(parent_id=1, name="Bank", source="bank", is_active=True)
+    db_session.add(bank)
+    await db_session.flush()
+
+    entry = DictionaryEntry(word="quest-parent", definition="test", source="manual")
+    db_session.add(entry)
+    await db_session.flush()
+    item = WordListItem(
+        word_list_id=bank.id,
+        dictionary_entry_id=entry.id,
+        sort_order=0,
+        level="A2",
+    )
+    db_session.add(item)
+    await db_session.flush()
+    db_session.add(WordListItemCategory(word_list_item_id=item.id, category="Food"))
+    await db_session.commit()
+
+    response = await client.get(
+        f"/api/v1/learners/{leo.id}/quests",
+        headers={"Authorization": f"Bearer {parent_token}"},
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["english_level"] == leo.english_level
+    assert "overall" in data
+    assert "packs" in data
+    assert data["newly_earned_badges"] == []
+
+
+@pytest.mark.asyncio
+async def test_parent_cannot_view_other_family_learner_quests(client) -> None:
+    parent_token = await _login(client, "parent", "parent123")
+    response = await client.get(
+        "/api/v1/learners/9999/quests",
+        headers={"Authorization": f"Bearer {parent_token}"},
+    )
+    assert response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_learner_cannot_use_parent_quests_endpoint(client) -> None:
+    leo_token = await _login(client, "leo", "leo")
+    parent_token = await _login(client, "parent", "parent123")
+    learners = await client.get(
+        "/api/v1/learners",
+        headers={"Authorization": f"Bearer {parent_token}"},
+    )
+    leo_id = next(row["id"] for row in learners.json() if row["username"] == "leo")
+
+    response = await client.get(
+        f"/api/v1/learners/{leo_id}/quests",
+        headers={"Authorization": f"Bearer {leo_token}"},
+    )
+    assert response.status_code == 403

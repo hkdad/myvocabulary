@@ -226,9 +226,7 @@ async def test_deactivate_learner(client: AsyncClient) -> None:
 
 
 @pytest.mark.asyncio
-async def test_delete_learner_permanent(
-    client: AsyncClient, db_session: AsyncSession
-) -> None:
+async def test_delete_learner_permanent(client: AsyncClient, db_session: AsyncSession) -> None:
     token = await _parent_token(client)
     create = await client.post(
         "/api/v1/learners",

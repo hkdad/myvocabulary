@@ -284,6 +284,10 @@ export async function getQuests(): Promise<QuestsSummary> {
   return apiFetch<QuestsSummary>("/loop/quests", {}, API_BASE_URL);
 }
 
+export async function getLearnerQuests(learnerId: number): Promise<QuestsSummary> {
+  return apiFetch<QuestsSummary>(`/learners/${learnerId}/quests`, {}, API_BASE_URL);
+}
+
 export type LearnerWordStrength = "learning" | "familiar" | "mastered";
 
 export type LearnerWordItem = {
