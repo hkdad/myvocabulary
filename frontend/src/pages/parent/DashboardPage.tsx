@@ -37,6 +37,13 @@ const QUICK_LINKS = [
     hint: "Assign lists to each child",
     color: "from-green-50 to-teal-50",
   },
+  {
+    to: "/parent/quests",
+    emoji: "🗺️",
+    title: "Quests",
+    hint: "Theme packs & badges per child",
+    color: "from-violet-50 to-purple-50",
+  },
 ];
 
 export default function DashboardPage() {

@@ -18,7 +18,8 @@ from app.schemas.learner import (
     LearnerUpdateRequest,
     ResetPasswordRequest,
 )
-from app.services import loop_engine
+from app.schemas.loop import QuestsSummaryResponse
+from app.services import achievement_service, loop_engine
 from app.services.learner_profile import resolve_learner_emoji
 
 router = APIRouter(prefix="/learners", tags=["learners"])
@@ -128,6 +129,19 @@ async def create_learner(
 @router.get("/{learner_id}", response_model=LearnerResponse)
 async def get_learner(learner: Learner = Depends(get_parent_learner)) -> LearnerResponse:
     return learner_to_response(learner)
+
+
+@router.get("/{learner_id}/quests", response_model=QuestsSummaryResponse)
+async def get_learner_quests(
+    learner: Learner = Depends(get_parent_learner),
+    parent: User = Depends(require_parent),
+    db: AsyncSession = Depends(get_db),
+) -> QuestsSummaryResponse:
+    data = await achievement_service.get_quests_summary(
+        db, learner=learner, parent_id=parent.id
+    )
+    data["newly_earned_badges"] = []
+    return QuestsSummaryResponse(**data)
 
 
 @router.patch("/{learner_id}", response_model=LearnerResponse)
