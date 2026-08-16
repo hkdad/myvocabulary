@@ -4,6 +4,7 @@ import { Link } from "react-router-dom";
 import {
   createLearner,
   deactivateLearner,
+  deleteLearner,
   dailyPracticeTotal,
   defaultDailyPractice,
   listLearners,
@@ -70,6 +71,7 @@ export default function LearnersPage() {
   const [form, setForm] = useState<FormState>(emptyForm());
   const [resetPasswordId, setResetPasswordId] = useState<number | null>(null);
   const [newPassword, setNewPassword] = useState("");
+  const [deletingId, setDeletingId] = useState<number | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -174,6 +176,33 @@ export default function LearnersPage() {
       await load();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not reactivate learner");
+    }
+  }
+
+  async function handleDelete(learner: LearnerProfile) {
+    if (
+      !window.confirm(
+        `Permanently delete ${learner.display_name}? All progress will be lost. This cannot be undone.`,
+      )
+    ) {
+      return;
+    }
+    setError(null);
+    setDeletingId(learner.id);
+    try {
+      await deleteLearner(learner.id);
+      const updated = await listLearners();
+      setLearners(updated);
+      if (updated.some((row) => row.id === learner.id)) {
+        setError(
+          `${learner.display_name} was not removed. Restart the backend, then try again.`,
+        );
+        return;
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not delete learner");
+    } finally {
+      setDeletingId(null);
     }
   }
 
@@ -426,24 +455,26 @@ export default function LearnersPage() {
                     </span>
                   </div>
                 </div>
-                <div className="flex flex-wrap gap-2">
-                  <button
-                    type="button"
-                    className="warm-btn warm-btn-secondary text-sm"
-                    onClick={() => openEdit(learner)}
-                  >
-                    Edit
-                  </button>
-                  <button
-                    type="button"
-                    className="warm-btn warm-btn-secondary text-sm"
-                    onClick={() => {
-                      setResetPasswordId(learner.id);
-                      setNewPassword("");
-                    }}
-                  >
-                    Reset password
-                  </button>
+                <div className="flex flex-col items-stretch gap-2 sm:items-end">
+                  <div className="flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      className="warm-btn warm-btn-secondary text-sm"
+                      onClick={() => openEdit(learner)}
+                    >
+                      Edit
+                    </button>
+                    <button
+                      type="button"
+                      className="warm-btn warm-btn-secondary text-sm"
+                      onClick={() => {
+                        setResetPasswordId(learner.id);
+                        setNewPassword("");
+                      }}
+                    >
+                      Reset password
+                    </button>
+                  </div>
                   {learner.is_active ? (
                     <button
                       type="button"
@@ -453,13 +484,23 @@ export default function LearnersPage() {
                       Deactivate
                     </button>
                   ) : (
-                    <button
-                      type="button"
-                      className="text-sm font-semibold text-green-700"
-                      onClick={() => void handleReactivate(learner)}
-                    >
-                      Reactivate
-                    </button>
+                    <div className="flex flex-wrap gap-3">
+                      <button
+                        type="button"
+                        className="text-sm font-semibold text-green-700"
+                        onClick={() => void handleReactivate(learner)}
+                      >
+                        Reactivate
+                      </button>
+                      <button
+                        type="button"
+                        className="text-sm font-semibold text-red-600 disabled:opacity-50"
+                        disabled={deletingId === learner.id}
+                        onClick={() => void handleDelete(learner)}
+                      >
+                        {deletingId === learner.id ? "Deleting…" : "Delete permanently"}
+                      </button>
+                    </div>
                   )}
                 </div>
                 {resetPasswordId === learner.id && (

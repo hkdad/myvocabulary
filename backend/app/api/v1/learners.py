@@ -1,7 +1,8 @@
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import delete, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -9,6 +10,7 @@ from app.api.deps import get_parent_learner, require_parent
 from app.core.security import hash_password
 from app.database import get_db
 from app.models.learner import Learner
+from app.models.srs import SrsReviewLog
 from app.models.user import RefreshToken, User
 from app.schemas.learner import (
     LearnerCreateRequest,
@@ -169,12 +171,25 @@ async def update_learner(
 
 
 @router.delete("/{learner_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def deactivate_learner(
+async def delete_learner(
     learner: Learner = Depends(get_parent_learner),
     db: AsyncSession = Depends(get_db),
 ) -> None:
-    learner.user.is_active = False
-    await db.commit()
+    user_id = learner.user_id
+    learner_id = learner.id
+    try:
+        await db.execute(delete(SrsReviewLog).where(SrsReviewLog.learner_id == learner_id))
+        learner_result = await db.execute(delete(Learner).where(Learner.id == learner_id))
+        if learner_result.rowcount == 0:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Learner not found")
+        await db.execute(delete(User).where(User.id == user_id))
+        await db.commit()
+    except IntegrityError as exc:
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Could not delete learner because related records still exist",
+        ) from exc
 
 
 @router.post("/{learner_id}/reset-password", status_code=status.HTTP_204_NO_CONTENT)
