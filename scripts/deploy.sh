@@ -4,9 +4,9 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
-REMOTE_HOST="${REMOTE_HOST:-your-server.local}"
-REMOTE_USER="${REMOTE_USER:-deploy}"
-REMOTE_DIR="${REMOTE_DIR:-~/myvocabulary}"
+REMOTE_HOST="${REMOTE_HOST:-docker.home}"
+REMOTE_USER="${REMOTE_USER:-jacky}"
+REMOTE_DIR="${REMOTE_DIR:-/home/jacky/myvocabulary}"
 REMOTE="${REMOTE_USER}@${REMOTE_HOST}"
 
 if ! command -v rsync >/dev/null 2>&1; then
@@ -20,6 +20,7 @@ if ! command -v ssh >/dev/null 2>&1; then
 fi
 
 echo "Deploying myvocabulary to ${REMOTE}:${REMOTE_DIR}"
+echo "Note: git pull on the server is the canonical update path. This script rsyncs code only."
 
 if ! ssh -o BatchMode=yes -o ConnectTimeout=5 "${REMOTE}" "echo ok" >/dev/null 2>&1; then
   echo "Error: cannot SSH to ${REMOTE}."
@@ -62,12 +63,19 @@ if [[ ! -f .env ]]; then
 fi
 
 # Ensure container paths and production settings even if .env already existed.
+# Do not overwrite CORS_ORIGINS if already set (production hostnames differ per install).
+if ! grep -q '^CORS_ORIGINS=.*docker.home' .env 2>/dev/null; then
+  sed -i.bak \
+    -e "s|^CORS_ORIGINS=.*|CORS_ORIGINS=http://docker.home:8080,http://192.168.1.40:8080|" \
+    .env
+  rm -f .env.bak
+fi
+
 sed -i.bak \
   -e "s|^DATABASE_URL=.*|DATABASE_URL=sqlite+aiosqlite:////app/data/myvocabulary.db|" \
   -e "s|^AUDIO_DIR=.*|AUDIO_DIR=/app/data/audio|" \
   -e "s/^APP_ENV=.*/APP_ENV=production/" \
   -e "s/^DEBUG=.*/DEBUG=false/" \
-  -e "s|^CORS_ORIGINS=.*|CORS_ORIGINS=http://your-server.local:8080,http://192.168.1.100:8080|" \
   .env
 rm -f .env.bak
 
@@ -76,5 +84,5 @@ chmod +x start.sh
 REMOTE_SCRIPT
 
 echo ""
-echo "Deployed. Open http://${REMOTE_HOST}:8080"
+echo "Deployed. Open http://${REMOTE_HOST}:8080 (or https://dict.home)"
 echo "Login: parent/parent123, mia/mia, leo/leo"

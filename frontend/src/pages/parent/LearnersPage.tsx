@@ -282,7 +282,7 @@ export default function LearnersPage() {
                         className="warm-input"
                         type="password"
                         required
-                        minLength={4}
+                        minLength={6}
                         value={form.password}
                         onChange={(e) => setForm({ ...form, password: e.target.value })}
                       />
@@ -510,7 +510,7 @@ export default function LearnersPage() {
                       <input
                         className="warm-input"
                         type="password"
-                        minLength={4}
+                        minLength={6}
                         value={newPassword}
                         onChange={(e) => setNewPassword(e.target.value)}
                       />
@@ -518,7 +518,7 @@ export default function LearnersPage() {
                     <button
                       type="button"
                       className="warm-btn warm-btn-primary text-sm"
-                      disabled={saving || newPassword.length < 4}
+                      disabled={saving || newPassword.length < 6}
                       onClick={() => void handleResetPassword(learner.id)}
                     >
                       Save password
