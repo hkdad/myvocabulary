@@ -1,5 +1,13 @@
+from datetime import UTC, datetime
+
 import pytest
 from httpx import AsyncClient
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.sm2 import DEFAULT_EASE_FACTOR
+from app.models.dictionary import DictionaryEntry
+from app.models.srs import SrsCard, SrsReviewLog
 
 
 async def _parent_token(client: AsyncClient) -> str:
@@ -198,16 +206,116 @@ async def test_deactivate_learner(client: AsyncClient) -> None:
         },
     )
     learner_id = create.json()["id"]
-    delete = await client.delete(
+    deactivate = await client.patch(
         f"/api/v1/learners/{learner_id}",
         headers={"Authorization": f"Bearer {token}"},
+        json={"is_active": False},
     )
-    assert delete.status_code == 204
+    assert deactivate.status_code == 200
+    assert deactivate.json()["is_active"] is False
     detail = await client.get(
         f"/api/v1/learners/{learner_id}",
         headers={"Authorization": f"Bearer {token}"},
     )
     assert detail.json()["is_active"] is False
+    login = await client.post(
+        "/api/v1/auth/login",
+        json={"username": "temp_kid", "password": "temp123"},
+    )
+    assert login.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_delete_learner_permanent(
+    client: AsyncClient, db_session: AsyncSession
+) -> None:
+    token = await _parent_token(client)
+    create = await client.post(
+        "/api/v1/learners",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "username": "gone_kid",
+            "password": "gone123",
+            "display_name": "Gone",
+            "age": 9,
+            "english_level": "A1",
+            "ui_mode": "kid",
+        },
+    )
+    assert create.status_code == 201
+    learner_id = create.json()["id"]
+    now = datetime.now(UTC)
+
+    entry = DictionaryEntry(
+        word="delete-test-word",
+        definition="For delete test",
+        source="test",
+    )
+    db_session.add(entry)
+    await db_session.flush()
+
+    card = SrsCard(
+        learner_id=learner_id,
+        dictionary_entry_id=entry.id,
+        ease_factor=DEFAULT_EASE_FACTOR,
+        interval_days=0,
+        repetitions=0,
+        due_at=now,
+        state="new",
+    )
+    db_session.add(card)
+    await db_session.flush()
+    db_session.add(
+        SrsReviewLog(
+            srs_card_id=card.id,
+            learner_id=learner_id,
+            quality=4,
+        )
+    )
+    await db_session.commit()
+
+    delete = await client.delete(
+        f"/api/v1/learners/{learner_id}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert delete.status_code == 204
+
+    detail = await client.get(
+        f"/api/v1/learners/{learner_id}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert detail.status_code == 404
+
+    listed = await client.get(
+        "/api/v1/learners",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert all(row["id"] != learner_id for row in listed.json())
+
+    login = await client.post(
+        "/api/v1/auth/login",
+        json={"username": "gone_kid", "password": "gone123"},
+    )
+    assert login.status_code == 401
+
+    recreate = await client.post(
+        "/api/v1/learners",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "username": "gone_kid",
+            "password": "newgone",
+            "display_name": "Gone Again",
+            "age": 9,
+            "english_level": "A1",
+            "ui_mode": "kid",
+        },
+    )
+    assert recreate.status_code == 201
+
+    logs = await db_session.execute(
+        select(SrsReviewLog).where(SrsReviewLog.learner_id == learner_id)
+    )
+    assert logs.scalars().all() == []
 
 
 @pytest.mark.asyncio

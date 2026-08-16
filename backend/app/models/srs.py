@@ -41,7 +41,9 @@ class SrsReviewLog(Base):
     srs_card_id: Mapped[int] = mapped_column(
         ForeignKey("srs_cards.id", ondelete="CASCADE"), index=True
     )
-    learner_id: Mapped[int] = mapped_column(ForeignKey("learners.id"), index=True)
+    learner_id: Mapped[int] = mapped_column(
+        ForeignKey("learners.id", ondelete="CASCADE"), index=True
+    )
     quality: Mapped[int] = mapped_column(Integer)
     ease_factor_before: Mapped[float | None] = mapped_column(Float, nullable=True)
     ease_factor_after: Mapped[float | None] = mapped_column(Float, nullable=True)

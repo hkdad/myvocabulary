@@ -471,8 +471,8 @@ Sync triggers on INSERT, UPDATE, DELETE keep FTS5 in sync with `dictionary_entri
 | GET | `/learners` | List parent's learners |
 | POST | `/learners` | Create learner account |
 | GET | `/learners/{id}` | Get learner detail |
-| PATCH | `/learners/{id}` | Update profile |
-| DELETE | `/learners/{id}` | Deactivate learner |
+| PATCH | `/learners/{id}` | Update profile (set `is_active: false` to deactivate) |
+| DELETE | `/learners/{id}` | Permanently delete learner account and all progress |
 | POST | `/learners/{id}/reset-password` | Reset learner password |
 | POST | `/learners/{id}/revoke-sessions` | Revoke all sessions |
 

@@ -67,6 +67,10 @@ export async function updateLearner(
 }
 
 export async function deactivateLearner(learnerId: number): Promise<void> {
+  await updateLearner(learnerId, { is_active: false });
+}
+
+export async function deleteLearner(learnerId: number): Promise<void> {
   await apiFetch<void>(
     `/learners/${learnerId}`,
     { method: "DELETE" },

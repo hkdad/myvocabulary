@@ -69,7 +69,7 @@ async def get_parent_learner(
         select(Learner).options(selectinload(Learner.user)).where(Learner.id == learner_id)
     )
     learner = result.scalar_one_or_none()
-    if learner is None:
+    if learner is None or learner.user is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Learner not found")
     if learner.user.parent_id != parent.id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Learner not found")
