@@ -16,17 +16,93 @@ export function setApiAccessToken(token: string | null) {
   accessToken = token;
 }
 
+type ValidationIssue = {
+  type?: string;
+  loc?: (string | number)[];
+  msg?: string;
+  ctx?: Record<string, unknown>;
+};
+
 type ApiError = {
   code?: string;
   message?: string;
-  detail?: string | { code?: string; message?: string; errors?: string[] };
+  detail?:
+    | string
+    | ValidationIssue[]
+    | { code?: string; message?: string; errors?: string[] };
 };
+
+const FIELD_LABELS: Record<string, string> = {
+  username: "Username",
+  password: "Password",
+  display_name: "Display name",
+  age: "Age",
+  english_level: "English level",
+  emoji: "Profile icon",
+  daily_new_word_goal: "New words per day",
+  daily_learning_retention_mix: "Learning retention",
+  daily_mastered_retention_mix: "Mastered retention",
+};
+
+function validationFieldLabel(loc: (string | number)[] | undefined): string | null {
+  if (!loc?.length) {
+    return null;
+  }
+  const field = [...loc].reverse().find((part) => typeof part === "string" && part !== "body");
+  if (typeof field !== "string") {
+    return null;
+  }
+  return FIELD_LABELS[field] ?? field.replaceAll("_", " ");
+}
+
+function humanizeValidationIssue(issue: ValidationIssue): string {
+  const label = validationFieldLabel(issue.loc);
+  const prefix = label ? `${label} ` : "";
+
+  switch (issue.type) {
+    case "string_too_short": {
+      const min = issue.ctx?.min_length;
+      return typeof min === "number"
+        ? `${prefix}must be at least ${min} characters.`
+        : `${prefix}is too short.`;
+    }
+    case "string_too_long": {
+      const max = issue.ctx?.max_length;
+      return typeof max === "number"
+        ? `${prefix}must be at most ${max} characters.`
+        : `${prefix}is too long.`;
+    }
+    case "greater_than_equal": {
+      const min = issue.ctx?.ge;
+      return typeof min === "number" ? `${prefix}must be at least ${min}.` : `${prefix}is too small.`;
+    }
+    case "less_than_equal": {
+      const max = issue.ctx?.le;
+      return typeof max === "number" ? `${prefix}must be at most ${max}.` : `${prefix}is too large.`;
+    }
+    case "missing":
+      return label ? `${label} is required.` : "This field is required.";
+    default:
+      break;
+  }
+
+  if (issue.msg) {
+    return issue.msg;
+  }
+  return label ? `${label} is invalid.` : "Something in the form is invalid.";
+}
 
 function parseErrorDetail(detail: ApiError["detail"]): string {
   if (typeof detail === "string") {
     return detail;
   }
-  if (detail && typeof detail === "object") {
+  if (Array.isArray(detail)) {
+    const messages = detail.map(humanizeValidationIssue).filter(Boolean);
+    if (messages.length > 0) {
+      return messages.slice(0, 3).join(" ");
+    }
+  }
+  if (detail && typeof detail === "object" && !Array.isArray(detail)) {
     if (detail.errors?.length) {
       return `${detail.message ?? "Import failed"}: ${detail.errors.slice(0, 3).join("; ")}`;
     }
@@ -34,7 +110,7 @@ function parseErrorDetail(detail: ApiError["detail"]): string {
       return detail.message;
     }
   }
-  return "Request failed";
+  return "Something went wrong. Please try again.";
 }
 
 function isAuthPath(path: string): boolean {

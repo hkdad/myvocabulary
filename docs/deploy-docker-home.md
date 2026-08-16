@@ -1,12 +1,15 @@
-# Deploy myvocabulary to your-server.local
+# Deploy myvocabulary to docker.home
 
-**Target:** Home production server (`your-server.local`)  
+**Target:** Home production server (`docker.home`, `192.168.1.40`)  
+**SSH:** `jacky@docker.home`  
+**Path:** `/home/jacky/myvocabulary`  
 **Port:** `8080` (host) → `8000` (container)  
-**Repo:** https://github.com/hkdad/myvocabulary
+**Repo:** https://github.com/hkdad/myvocabulary  
+**Also reachable:** `https://dict.home` (Caddy reverse proxy to `:8080`)
 
 ---
 
-## Quick deploy
+## Quick deploy (fresh server)
 
 ```bash
 git clone https://github.com/hkdad/myvocabulary.git
@@ -18,9 +21,36 @@ chmod +x start.sh scripts/backup-db.sh
 ./start.sh
 ```
 
-Open: `http://your-server.local:8080`
+Open: `http://docker.home:8080` or `https://dict.home`
 
 **Test logins:** `parent`/`parent123`, `mia`/`mia`, `leo`/`leo`, `max`/`max`
+
+---
+
+## Migrate from jackywongxp/myvocabulary (one-time)
+
+If the server already has a checkout from the old private repo, histories do not share commits. Retarget origin and hard-reset (keeps `./data/` and `.env`):
+
+```bash
+cd /home/jacky/myvocabulary
+
+# Backup live DB first
+docker compose exec -T app python -c "
+import sqlite3, datetime
+src = sqlite3.connect('/app/data/myvocabulary.db')
+path = '/app/data/backups/myvocabulary_' + datetime.datetime.now().strftime('%Y%m%d_%H%M%S') + '.db'
+dst = sqlite3.connect(path)
+src.backup(dst); dst.close(); src.close()
+print(path)
+"
+
+git remote set-url origin https://github.com/hkdad/myvocabulary.git
+git fetch origin
+git reset --hard origin/main
+git clean -fd
+mkdir -p data/curated   # required for Docker build context
+docker compose up -d --build
+```
 
 ---
 
@@ -29,7 +59,7 @@ Open: `http://your-server.local:8080`
 The database has no users yet. Run the seed script:
 
 ```bash
-cd /path/to/myvocabulary
+cd /home/jacky/myvocabulary
 docker compose exec -T app python scripts/seed.py
 ```
 
@@ -75,7 +105,7 @@ Expected: JSON with `"access_token"`. If you get `AUTH_INVALID_CREDENTIALS`, run
 | `SECRET_KEY` | Random 32-byte hex (`openssl rand -hex 32`) — **required**; app refuses to start if still the default |
 | `DEBUG` | `false` |
 | `APP_ENV` | `production` |
-| `CORS_ORIGINS` | URLs you use, e.g. `http://your-server.local:8080,http://192.168.x.x:8080` |
+| `CORS_ORIGINS` | `http://docker.home:8080,http://192.168.1.40:8080` (add `https://dict.home` if you use the Caddy hostname) |
 
 **Security notes (production):**
 - Login quick-picks show display names only (no usernames).
@@ -86,14 +116,19 @@ Expected: JSON with `"access_token"`. If you get `AUTH_INVALID_CREDENTIALS`, run
 
 ---
 
-## Updates
+## Updates (canonical)
+
+On the server:
 
 ```bash
+cd /home/jacky/myvocabulary
 git pull
 docker compose up -d --build
 ```
 
 Data in `./data/` is preserved.
+
+From your Mac, you can also rsync via `scripts/deploy.sh` (fallback; does not change git remote).
 
 ---
 

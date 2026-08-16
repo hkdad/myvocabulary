@@ -62,7 +62,7 @@ myvocabulary/
 - [Project Status](docs/project-status.md)
 - [Architecture](docs/architecture.md)
 - [Backup / restore](docs/backup-restore.md)
-- [Deploy (your-server.local)](docs/deploy-docker-home.md)
+- [Deploy (docker.home)](docs/deploy-docker-home.md)
 
 ## Sprint status
 
