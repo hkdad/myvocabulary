@@ -1,5 +1,6 @@
 from fastapi import APIRouter
 
+from app.version import get_version
 from app.api.v1 import (
     auth,
     books,
@@ -33,4 +34,4 @@ router.include_router(challenges.router)
 
 @router.get("/status")
 async def api_status() -> dict[str, str]:
-    return {"status": "ok", "version": "0.1.0"}
+    return {"status": "ok", "version": get_version()}
