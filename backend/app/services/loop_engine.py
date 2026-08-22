@@ -1244,9 +1244,7 @@ async def build_daily_mix(
     if cards:
         from app.services import dictionary_service as dictionary_svc
 
-        mix_entries = [
-            card.dictionary_entry for card in cards if card.dictionary_entry is not None
-        ]
+        mix_entries = [card.dictionary_entry for card in cards if card.dictionary_entry is not None]
         await dictionary_svc.prefetch_challenge_definitions(db, mix_entries)
 
     await srs_service.enrich_cards_zh_hant(db, cards)
@@ -1812,9 +1810,7 @@ async def list_learner_words(
         from app.services import dictionary_service
 
         page_entry_ids = [
-            row["dictionary_entry_id"]
-            for row in page_items
-            if row.get("dictionary_entry_id")
+            row["dictionary_entry_id"] for row in page_items if row.get("dictionary_entry_id")
         ]
         if page_entry_ids:
             entries_result = await db.execute(

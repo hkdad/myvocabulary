@@ -205,9 +205,7 @@ async def test_prefetch_challenge_definitions_commits_cache(db_session) -> None:
         await prefetch_challenge_definitions(db_session, [entry])
 
     db_session.expire_all()
-    result = await db_session.execute(
-        select(DictionaryEntry).where(DictionaryEntry.id == entry_id)
-    )
+    result = await db_session.execute(select(DictionaryEntry).where(DictionaryEntry.id == entry_id))
     cached = result.scalar_one()
     assert cached.definition == api_payload["definition"]
     assert cached.source == "freedictionary"
@@ -285,8 +283,6 @@ async def test_list_learner_words_fills_placeholder_definitions(db_session) -> N
     assert data["total"] >= 1
     precious = next(item for item in data["items"] if item["word"] == "precious")
     assert precious["definition"] == api_payload["definition"]
-    result = await db_session.execute(
-        select(DictionaryEntry).where(DictionaryEntry.id == entry_id)
-    )
+    result = await db_session.execute(select(DictionaryEntry).where(DictionaryEntry.id == entry_id))
     cached = result.scalar_one()
     assert not is_placeholder_definition(cached)
