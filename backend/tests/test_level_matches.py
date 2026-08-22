@@ -54,7 +54,9 @@ def test_level_matches_at_or_below(item_level: str, learner_level: str, expected
         ("", "A1", False),
     ],
 )
-def test_level_matches_at_or_above(item_level: str | None, learner_level: str, expected: bool) -> None:
+def test_level_matches_at_or_above(
+    item_level: str | None, learner_level: str, expected: bool
+) -> None:
     assert level_matches_at_or_above(item_level, learner_level) is expected
 
 

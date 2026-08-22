@@ -571,7 +571,8 @@ async def test_book_drip_excludes_below_level_keeps_unbanked(
     learner = (
         await db_session.execute(select(Learner).where(Learner.display_name == "Leo"))
     ).scalar_one()
-    assert learner.english_level == "A2"
+    learner.english_level = "A2"
+    await db_session.commit()
 
     preview = await client.post(
         "/api/v1/books/preview",
@@ -668,6 +669,7 @@ async def test_book_drip_empty_pool_retention_only(client: AsyncClient, db_sessi
     yesterday = now - timedelta(days=1)
     retention_card.released_at = yesterday
     retention_card.due_at = now - timedelta(hours=1)
+    retention_card.last_reviewed_at = yesterday
     retention_card.state = "review"
     retention_card.interval_days = 5
     retention_card.repetitions = 1
@@ -743,7 +745,8 @@ async def test_book_retention_still_includes_below_level_srs(
     learner = (
         await db_session.execute(select(Learner).where(Learner.display_name == "Leo"))
     ).scalar_one()
-    assert learner.english_level == "A2"
+    learner.english_level = "A2"
+    await db_session.commit()
 
     old_entry = (
         await db_session.execute(select(DictionaryEntry).where(DictionaryEntry.word == "oldword"))
@@ -760,6 +763,7 @@ async def test_book_retention_still_includes_below_level_srs(
     yesterday = now - timedelta(days=1)
     old_card.released_at = yesterday
     old_card.due_at = now - timedelta(hours=1)
+    old_card.last_reviewed_at = yesterday
     old_card.state = "review"
     old_card.interval_days = 5
     old_card.repetitions = 1
