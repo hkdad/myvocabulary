@@ -87,6 +87,10 @@ class DailyMixResponse(BaseModel):
     study_progress_percent: float | None = None
     page_coverage_percent: float | None = None
     ready_to_read: bool | None = None
+    book_study_total: int | None = None
+    book_learning_count: int | None = None
+    book_familiar_count: int | None = None
+    book_mastered_count: int | None = None
 
 
 class ChallengeSourceCategory(BaseModel):
@@ -190,6 +194,7 @@ class LearnerWordItem(BaseModel):
     word: str
     definition: str
     level: str | None = None
+    levels: list[str] = Field(default_factory=list)
     categories: list[str] = Field(default_factory=list)
     strength: str
     distinct_review_days: int = 0
@@ -206,5 +211,7 @@ class LearnerWordsResponse(BaseModel):
     page_size: int
     total_pages: int
     by_level: dict[str, int] = Field(default_factory=dict)
+    by_bank_level: dict[str, int] = Field(default_factory=dict)
+    by_book: dict[str, int] = Field(default_factory=dict)
     by_category: dict[str, int] = Field(default_factory=dict)
     by_strength: dict[str, int] = Field(default_factory=dict)

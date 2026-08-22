@@ -134,11 +134,8 @@ export default function ReviewPage() {
   }, [skipSetup, dailyParam, wordListId, loadSession]);
 
   const currentCard = cards[index];
-  const { choices: definitionChoices, clearZhForEntry } = useLazyDefinitionChoices(
-    cards,
-    index,
-    setCards,
-  );
+  const { choices: definitionChoices, clearZhForEntry, loadingDefinitions, definitionUnavailable } =
+    useLazyDefinitionChoices(cards, index, setCards);
 
   function handleZhCleared(entryId: number) {
     clearZhForEntry(entryId);
@@ -434,10 +431,31 @@ export default function ReviewPage() {
               </button>
             </div>
 
+            {loadingDefinitions && !revealed && (
+              <p className="text-center text-sm font-semibold text-warm-muted">Loading meanings…</p>
+            )}
+            {definitionUnavailable && !revealed && (
+              <div className="rounded-2xl border border-amber-200 bg-amber-50/90 px-4 py-3 text-center text-sm text-warm-brown">
+                <p className="font-semibold">
+                  No dictionary meaning for &ldquo;{currentCard.dictionary_entry.word}&rdquo;
+                </p>
+                <button
+                  type="button"
+                  className="warm-btn warm-btn-secondary mt-3 text-sm"
+                  disabled={submitting}
+                  onClick={() => void handleRate(1)}
+                >
+                  Skip this word
+                </button>
+              </div>
+            )}
+
             <FlashcardDeck
               card={currentCard}
               revealed={revealed}
-              definitionChoices={definitionChoices}
+              definitionChoices={
+                loadingDefinitions || definitionUnavailable ? [] : definitionChoices
+              }
               pickFeedback={pickFeedback}
               onPickDefinition={handlePickDefinition}
               onZhCleared={handleZhCleared}

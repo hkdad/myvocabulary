@@ -185,6 +185,15 @@ async def test_book_mode_new_from_book_retention_from_bank(client: AsyncClient, 
     assert mix_words & retention_words or payload["retention_count"] >= 1
     assert new_cards or payload["new_count"] >= 1
 
+    words = await client.get(
+        "/api/v1/loop/words",
+        headers={"Authorization": f"Bearer {leo_token}"},
+    )
+    assert words.status_code == 200
+    book_title = confirm.json()["title"]
+    assert book_title in words.json()["by_level"]
+    assert words.json()["by_level"][book_title] >= 1
+
 
 @pytest.mark.asyncio
 async def test_closing_book_restores_bank_drip(client: AsyncClient, db_session) -> None:
@@ -349,6 +358,51 @@ async def test_baseline_match_counts_family_bank_only(client: AsyncClient, db_se
 
 
 @pytest.mark.asyncio
+async def test_update_book_title(client: AsyncClient) -> None:
+    token = await _login(client, "parent", "parent123")
+    preview = await client.post(
+        "/api/v1/books/preview",
+        headers={"Authorization": f"Bearer {token}"},
+        files={"file": ("fox.txt", io.BytesIO(FOX_STORY.encode()), "text/plain")},
+    )
+    book_id = preview.json()["id"]
+    updated = await client.patch(
+        f"/api/v1/books/{book_id}",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"title": "The Fox and the Hill"},
+    )
+    assert updated.status_code == 200
+    assert updated.json()["title"] == "The Fox and the Hill"
+    assert updated.json()["title_needs_review"] is False
+
+
+@pytest.mark.asyncio
+async def test_delete_confirmed_book(client: AsyncClient, db_session) -> None:
+    token = await _login(client, "parent", "parent123")
+    preview = await client.post(
+        "/api/v1/books/preview",
+        headers={"Authorization": f"Bearer {token}"},
+        files={"file": ("fox.txt", io.BytesIO(FOX_STORY.encode()), "text/plain")},
+    )
+    book_id = preview.json()["id"]
+    await client.post(
+        f"/api/v1/books/{book_id}/confirm",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"coverage_target": 0.8, "title": "Fox Story"},
+    )
+    deleted = await client.delete(
+        f"/api/v1/books/{book_id}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert deleted.status_code == 204
+    missing = await client.get(
+        f"/api/v1/books/{book_id}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert missing.status_code == 404
+
+
+@pytest.mark.asyncio
 async def test_progress_credits_baseline_srs(client: AsyncClient, db_session) -> None:
     parent_token = await _login(client, "parent", "parent123")
     csv_content = "word,definition,level,category\nfox,A wild animal,A1,Animals\n"
@@ -407,3 +461,86 @@ async def test_progress_credits_baseline_srs(client: AsyncClient, db_session) ->
     row = progress.json()[0]
     assert row["study_known"] >= 1
     assert row["study_progress_percent"] > 0
+    assert row["learning_count"] >= 1
+    assert row["familiar_count"] >= 0
+    assert row["mastered_count"] >= 0
+
+
+@pytest.mark.asyncio
+async def test_learner_words_overlap_shows_bank_level_and_book(client: AsyncClient, db_session) -> None:
+    parent_token = await _login(client, "parent", "parent123")
+    csv_content = "word,definition,level,category\nfox,A wild animal,A1,Animals\n"
+    await client.post(
+        "/api/v1/word-bank/import",
+        headers={"Authorization": f"Bearer {parent_token}"},
+        files={"file": ("bank.csv", io.BytesIO(csv_content.encode()), "text/csv")},
+    )
+    learner = (
+        await db_session.execute(select(Learner).where(Learner.display_name == "Leo"))
+    ).scalar_one()
+    fox_entry = (
+        await db_session.execute(select(DictionaryEntry).where(DictionaryEntry.word == "fox"))
+    ).scalar_one()
+    card = (
+        await db_session.execute(
+            select(SrsCard).where(
+                SrsCard.learner_id == learner.id,
+                SrsCard.dictionary_entry_id == fox_entry.id,
+            )
+        )
+    ).scalar_one()
+    card.released_at = datetime.now(UTC)
+    db_session.add(
+        SrsReviewLog(
+            srs_card_id=card.id,
+            learner_id=learner.id,
+            quality=4,
+            reviewed_at=datetime.now(UTC),
+        )
+    )
+    await db_session.commit()
+
+    preview = await client.post(
+        "/api/v1/books/preview",
+        headers={"Authorization": f"Bearer {parent_token}"},
+        files={"file": ("fox.txt", io.BytesIO(FOX_STORY.encode()), "text/plain")},
+    )
+    book_id = preview.json()["id"]
+    confirm = await client.post(
+        f"/api/v1/books/{book_id}/confirm",
+        headers={"Authorization": f"Bearer {parent_token}"},
+        json={"coverage_target": 0.8, "title": "Fox Story"},
+    )
+    book_title = confirm.json()["title"]
+    await client.post(
+        f"/api/v1/books/{book_id}/assign",
+        headers={"Authorization": f"Bearer {parent_token}"},
+        json={"learner_id": learner.id},
+    )
+
+    leo_token = await _login(client, "leo", "leo")
+    words = await client.get(
+        "/api/v1/loop/words",
+        headers={"Authorization": f"Bearer {leo_token}"},
+    )
+    assert words.status_code == 200
+    payload = words.json()
+    fox_row = next(item for item in payload["items"] if item["word"] == "fox")
+    assert "A1" in fox_row["levels"]
+    assert book_title in fox_row["levels"]
+    assert payload["by_bank_level"].get("A1", 0) >= 1
+    assert payload["by_book"].get(book_title, 0) >= 1
+    assert payload["by_level"].get("A1", 0) >= 1
+    assert book_title not in payload["by_level"]
+
+    by_a1 = await client.get(
+        f"/api/v1/loop/words?level=A1",
+        headers={"Authorization": f"Bearer {leo_token}"},
+    )
+    assert any(item["word"] == "fox" for item in by_a1.json()["items"])
+
+    by_book = await client.get(
+        f"/api/v1/loop/words?level={book_title}",
+        headers={"Authorization": f"Bearer {leo_token}"},
+    )
+    assert any(item["word"] == "fox" for item in by_book.json()["items"])

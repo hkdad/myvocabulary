@@ -6,6 +6,8 @@ import { getLoopToday, type DailyMix } from "../../api/loop";
 import LearnerPageHeader from "../../components/LearnerPageHeader";
 import LevelProgressCard from "../../components/LevelProgressCard";
 import PageShell from "../../components/PageShell";
+import StrengthProgressBar from "../../components/quest/StrengthProgressBar";
+import { inProgressCount } from "../../lib/strengthStyles";
 import { useAuthStore } from "../../stores/authStore";
 
 type LearningTile = {
@@ -64,7 +66,10 @@ export default function LearnerHomePage() {
     setMixError(null);
 
     void getLoopToday()
-      .then(setDailyMix)
+      .then((mix) => {
+        setDailyMix(mix);
+        setMixError(null);
+      })
       .catch((err: Error) => {
         setDailyMix(null);
         setMixError(err.message);
@@ -84,6 +89,15 @@ export default function LearnerHomePage() {
       : stats?.daily_practice_goal ?? learner?.daily_practice_goal ?? 0;
   const progress = practiceProgress(dailyMix);
   const shellVariant = learner?.ui_mode === "kid" ? "kid" : "teen";
+  const bookCounts = dailyMix?.book_title
+    ? {
+        bank_total: dailyMix.book_study_total ?? 0,
+        learning: dailyMix.book_learning_count ?? 0,
+        familiar: dailyMix.book_familiar_count ?? 0,
+        mastered: dailyMix.book_mastered_count ?? 0,
+      }
+    : null;
+  const bookInProgress = bookCounts ? inProgressCount(bookCounts) : 0;
 
   return (
     <PageShell variant={shellVariant}>
@@ -98,10 +112,12 @@ export default function LearnerHomePage() {
         <section className="warm-card bg-gradient-to-br from-amber-50/90 to-orange-50/90 p-6">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div className="flex-1">
-              <div className="flex items-center gap-3">
-                <span className="text-3xl">🎯</span>
-                <div>
-                  <h2 className="text-lg font-extrabold text-warm-brown">Daily challenge</h2>
+              <div className="flex items-start gap-3">
+                <span className="shrink-0 text-3xl leading-none" aria-hidden="true">
+                  🎯
+                </span>
+                <div className="min-w-0">
+                  <h2 className="text-lg font-extrabold leading-tight text-warm-brown">Daily challenge</h2>
                   {dailyMix ? (
                     <p className="text-sm text-warm-brown-soft">
                       Up to <strong>{dailyMix.daily_new_goal}</strong> new +{" "}
@@ -123,7 +139,7 @@ export default function LearnerHomePage() {
 
               {mixError && (
                 <p className="mt-4 text-sm font-semibold text-red-600">
-                  Could not load daily challenge — check that the server is running.
+                  Could not load daily challenge — {mixError}
                 </p>
               )}
 
@@ -203,21 +219,39 @@ export default function LearnerHomePage() {
           </div>
         </section>
 
-        {dailyMix?.book_title && (
-          <section className="warm-card p-6">
-            <p className="text-sm font-bold text-warm-muted">Book progress</p>
-            <h2 className="mt-1 text-lg font-extrabold text-warm-brown">{dailyMix.book_title}</h2>
-            <div className="mt-4 h-3 overflow-hidden rounded-full bg-orange-100">
-              <div
-                className="h-full rounded-full bg-gradient-to-r from-emerald-400 to-teal-300"
-                style={{ width: `${Math.min(100, dailyMix.study_progress_percent ?? 0)}%` }}
-              />
+        {dailyMix?.book_title && bookCounts && (
+          <section className="warm-card bg-gradient-to-br from-emerald-50/90 to-teal-50/90 p-5">
+            <div className="flex items-start gap-3">
+              <span className="shrink-0 text-3xl leading-none" aria-hidden="true">
+                📚
+              </span>
+              <div className="min-w-0 flex-1">
+                <h2 className="text-lg font-extrabold leading-tight text-warm-brown">Book progress</h2>
+                <p className="mt-1 text-sm font-semibold text-warm-brown">{dailyMix.book_title}</p>
+                {bookCounts.bank_total > 0 && (
+                  <>
+                    <p className="mt-1 text-sm text-warm-body">
+                      <strong>{bookInProgress}</strong> of{" "}
+                      <strong>{bookCounts.bank_total}</strong> study words in progress —{" "}
+                      <strong>{bookCounts.mastered}</strong> mastered
+                    </p>
+                    {bookInProgress > 0 && (
+                      <div className="mt-3">
+                        <StrengthProgressBar
+                          counts={bookCounts}
+                          ariaLabel={`${dailyMix.book_title} study set progress`}
+                        />
+                      </div>
+                    )}
+                  </>
+                )}
+                <p className="mt-3 text-sm text-warm-body">
+                  Study set {dailyMix.study_progress_percent ?? 0}% known · page coverage{" "}
+                  {dailyMix.page_coverage_percent ?? 0}%
+                  {dailyMix.ready_to_read ? " · ready to read with help" : ""}
+                </p>
+              </div>
             </div>
-            <p className="mt-2 text-sm text-warm-body">
-              Study set {dailyMix.study_progress_percent ?? 0}% known · page coverage{" "}
-              {dailyMix.page_coverage_percent ?? 0}%
-              {dailyMix.ready_to_read ? " · ready to read with help" : ""}
-            </p>
           </section>
         )}
 

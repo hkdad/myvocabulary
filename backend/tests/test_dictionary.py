@@ -173,6 +173,40 @@ async def test_translate_includes_word_context_in_chat_request() -> None:
 
 
 @pytest.mark.asyncio
+async def test_translate_falls_back_to_mymemory_without_api_key() -> None:
+    from app.services.dictionary_service import translate_definition_to_zh_hant
+
+    async def fake_get(url: str, **kwargs):
+        response = MagicMock()
+        response.status_code = 200
+        response.json.return_value = {
+            "responseData": {"translatedText": "有輪子的圓形物體，使車輛能夠移動。"}
+        }
+        return response
+
+    mock_client = MagicMock()
+    mock_client.get = AsyncMock(side_effect=fake_get)
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+
+    with (
+        patch("app.services.dictionary_service.get_settings") as mock_settings,
+        patch("app.services.dictionary_service.httpx.AsyncClient", return_value=mock_client),
+    ):
+        mock_settings.return_value.openai_api_key = None
+        mock_settings.return_value.openai_api_base = "https://api.example.com/v1"
+        mock_settings.return_value.openai_model = "test-model"
+
+        zh = await translate_definition_to_zh_hant(
+            "a circular object that turns and allows vehicles to move",
+            word="wheel",
+        )
+
+    assert zh is not None
+    assert "輪" in zh
+
+
+@pytest.mark.asyncio
 async def test_ensure_zh_passes_entry_context_to_translate(client, db_session) -> None:
     from app.models.dictionary import DictionaryEntry
 

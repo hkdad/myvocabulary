@@ -21,11 +21,16 @@ export type BookProgress = {
   page_coverage_percent: number;
   ready_to_read: boolean;
   days_estimate: number;
+  learning_count: number;
+  familiar_count: number;
+  mastered_count: number;
 };
 
 export type BookSummary = {
   id: number;
   title: string;
+  title_source?: string;
+  title_needs_review?: boolean;
   original_filename: string;
   status: string;
   coverage_target: number;
@@ -66,10 +71,22 @@ export async function getBook(bookId: number): Promise<BookSummary> {
 export async function confirmBook(
   bookId: number,
   coverageTarget?: number,
+  title?: string,
 ): Promise<BookSummary> {
   return apiFetch<BookSummary>(
     `/books/${bookId}/confirm`,
-    { method: "POST", body: JSON.stringify({ coverage_target: coverageTarget ?? null }) },
+    {
+      method: "POST",
+      body: JSON.stringify({ coverage_target: coverageTarget ?? null, title: title ?? null }),
+    },
+    API_BASE_URL,
+  );
+}
+
+export async function updateBookTitle(bookId: number, title: string): Promise<BookSummary> {
+  return apiFetch<BookSummary>(
+    `/books/${bookId}`,
+    { method: "PATCH", body: JSON.stringify({ title }) },
     API_BASE_URL,
   );
 }

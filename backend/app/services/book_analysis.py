@@ -10,6 +10,7 @@ from __future__ import annotations
 import html
 import io
 import re
+import xml.etree.ElementTree as ET
 import zipfile
 from dataclasses import dataclass, field
 
@@ -310,7 +311,9 @@ def fallback_lemmatize(token: str) -> str:
             stem = stem[:-1]
         return stem
     if lower.endswith("s") and not lower.endswith("ss") and len(lower) > 3:
-        return lower[:-1]
+        # Keep -ous/-us/-is (conscious, focus, basis) — naive -s strip breaks them.
+        if not lower.endswith(("ous", "us", "is")):
+            return lower[:-1]
     return lower
 
 
@@ -511,3 +514,90 @@ def title_from_filename(filename: str) -> str:
         stem = stem.rsplit(".", 1)[0]
     cleaned = re.sub(r"[_-]+", " ", stem).strip()
     return cleaned[:255] or "Untitled book"
+
+
+_TITLE_LINE_RE = re.compile(r"^title\s*:\s*(.+)$", re.IGNORECASE)
+_CHAPTER_LINE_RE = re.compile(r"^(chapter|part|section|book)\s+[\dIVXLC]+", re.IGNORECASE)
+
+
+def _local_tag(tag: str) -> str:
+    return tag.rsplit("}", 1)[-1].lower()
+
+
+def extract_epub_title(data: bytes) -> str | None:
+    """Read dc:title from EPUB package metadata."""
+    with zipfile.ZipFile(io.BytesIO(data)) as archive:
+        opf_names = sorted(name for name in archive.namelist() if name.lower().endswith(".opf"))
+        for name in opf_names:
+            try:
+                root = ET.fromstring(archive.read(name))
+            except ET.ParseError:
+                continue
+            for elem in root.iter():
+                if _local_tag(elem.tag) != "title":
+                    continue
+                text = (elem.text or "").strip()
+                if text and len(text) >= 2:
+                    return html.unescape(text)[:255]
+    return None
+
+
+_H1_RE = re.compile(r"<h1[^>]*>(.*?)</h1>", re.IGNORECASE | re.DOTALL)
+
+
+def extract_epub_heading_title(data: bytes) -> str | None:
+    """First chapter h1 as a fallback when OPF metadata is missing."""
+    with zipfile.ZipFile(io.BytesIO(data)) as archive:
+        names = sorted(name for name in archive.namelist() if _safe_zip_member(name))
+        for name in names[:5]:
+            raw = archive.read(name)
+            match = _H1_RE.search(extract_txt(raw))
+            if not match:
+                continue
+            title = HTML_TAG_RE.sub(" ", match.group(1))
+            title = html.unescape(title).strip()
+            if len(title) >= 3:
+                return title[:255]
+    return None
+
+
+def infer_title_from_text(text: str) -> str | None:
+    """Use an explicit Title: line or the first line that looks like a book title."""
+    lines = [line.strip() for line in text.splitlines()]
+    for line in lines[:30]:
+        match = _TITLE_LINE_RE.match(line)
+        if match:
+            title = match.group(1).strip()
+            if len(title) >= 2:
+                return title[:255]
+
+    for line in lines[:20]:
+        if not line or len(line) < 3 or len(line) > 100:
+            continue
+        if _CHAPTER_LINE_RE.match(line):
+            continue
+        if line.endswith(".") and len(line.split()) > 4:
+            continue
+        if line.count(".") > 1 and len(line.split()) > 10:
+            continue
+        if len(line.split()) > 12:
+            continue
+        return line[:255]
+    return None
+
+
+def extract_book_title(*, filename: str, data: bytes, text: str) -> tuple[str, str]:
+    """Return (title, source) — source is metadata | content | filename."""
+    if filename.lower().endswith(".epub"):
+        epub_title = extract_epub_title(data)
+        if epub_title:
+            return epub_title, "metadata"
+        heading = extract_epub_heading_title(data)
+        if heading:
+            return heading, "content"
+    text_title = infer_title_from_text(text)
+    filename_title = title_from_filename(filename)
+    if text_title:
+        if text_title.casefold() != filename_title.casefold() or len(text_title.split()) >= 3:
+            return text_title, "content"
+    return filename_title, "filename"

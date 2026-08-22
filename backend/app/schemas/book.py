@@ -21,11 +21,16 @@ class BookProgress(BaseModel):
     page_coverage_percent: float
     ready_to_read: bool
     days_estimate: int = 0
+    learning_count: int = 0
+    familiar_count: int = 0
+    mastered_count: int = 0
 
 
 class BookSummary(BaseModel):
     id: int
     title: str
+    title_source: str = "filename"
+    title_needs_review: bool = False
     original_filename: str
     status: str
     coverage_target: float
@@ -54,6 +59,11 @@ class BookListResponse(BaseModel):
 
 class BookConfirmRequest(BaseModel):
     coverage_target: float | None = None
+    title: str | None = None
+
+
+class BookUpdateRequest(BaseModel):
+    title: str
 
 
 class BookAssignRequest(BaseModel):

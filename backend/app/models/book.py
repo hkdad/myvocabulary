@@ -16,6 +16,7 @@ class Book(Base, TimestampMixin):
         ForeignKey("word_lists.id", ondelete="SET NULL"), nullable=True, unique=True
     )
     title: Mapped[str] = mapped_column(String(255))
+    title_source: Mapped[str] = mapped_column(String(16), default="filename")
     original_filename: Mapped[str] = mapped_column(String(255))
     status: Mapped[str] = mapped_column(String(16), default="preview")
     coverage_target: Mapped[float] = mapped_column(Float, default=0.80)

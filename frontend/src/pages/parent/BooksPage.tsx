@@ -1,4 +1,4 @@
-import { type ChangeEvent, type FormEvent, useCallback, useEffect, useState } from "react";
+import { type ChangeEvent, useCallback, useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 
 import {
@@ -11,14 +11,77 @@ import {
   listBooks,
   previewBook,
   unassignBook,
+  updateBookTitle,
   type BookProgress,
   type BookSummary,
 } from "../../api/books";
 import { listLearners, type LearnerProfile } from "../../api/learners";
+import LearnerAvatar from "../../components/LearnerAvatar";
 import PageShell from "../../components/PageShell";
 
 function coverageLabel(target: number): string {
   return target >= 0.9 ? "Read independently (90%)" : "Read with help (80%)";
+}
+
+function statusBadge(status: string, coverageTarget: number) {
+  if (status === "confirmed") {
+    return (
+      <span className="rounded-full bg-emerald-100 px-3 py-1 text-xs font-bold text-emerald-800">
+        {coverageLabel(coverageTarget)}
+      </span>
+    );
+  }
+  return (
+    <span className="rounded-full bg-amber-100 px-3 py-1 text-xs font-bold text-amber-800">
+      Preview — not confirmed yet
+    </span>
+  );
+}
+
+function ConfirmStudySetButtons({
+  confirming,
+  titleDraft,
+  onConfirm,
+}: {
+  confirming: boolean;
+  titleDraft: string;
+  onConfirm: (target: number) => void;
+}) {
+  return (
+    <div className="mt-3 flex flex-wrap gap-2">
+      <button
+        type="button"
+        disabled={confirming || !titleDraft.trim()}
+        onClick={() => onConfirm(0.8)}
+        className="warm-btn warm-btn-primary text-sm"
+      >
+        {confirming ? "Confirming…" : "Confirm 80% · read with help"}
+      </button>
+      <button
+        type="button"
+        disabled={confirming || !titleDraft.trim()}
+        onClick={() => onConfirm(0.9)}
+        className="warm-btn text-sm"
+      >
+        Confirm 90% · read independently
+      </button>
+    </div>
+  );
+}
+function stepState(
+  selected: BookSummary | null,
+): { upload: boolean; confirm: boolean; assign: boolean } {
+  if (!selected) {
+    return { upload: true, confirm: false, assign: false };
+  }
+  if (selected.status === "preview") {
+    return { upload: true, confirm: true, assign: false };
+  }
+  return {
+    upload: true,
+    confirm: true,
+    assign: selected.assigned_learner_ids.length === 0,
+  };
 }
 
 export default function BooksPage() {
@@ -29,9 +92,16 @@ export default function BooksPage() {
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
   const [confirming, setConfirming] = useState(false);
+  const [savingTitle, setSavingTitle] = useState(false);
+  const [titleSaved, setTitleSaved] = useState(false);
+  const [assigningId, setAssigningId] = useState<number | null>(null);
+  const [deletingId, setDeletingId] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [assignId, setAssignId] = useState<number | "">("");
+  const [titleDraft, setTitleDraft] = useState("");
   const [hidingLemmaId, setHidingLemmaId] = useState<number | null>(null);
+  const assignSectionRef = useRef<HTMLDivElement>(null);
+
+  const steps = stepState(selected);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -51,11 +121,19 @@ export default function BooksPage() {
     void load();
   }, [load]);
 
+  useEffect(() => {
+    if (selected) {
+      setTitleDraft(selected.title);
+      setTitleSaved(false);
+    }
+  }, [selected?.id, selected?.title]);
+
   async function openBook(bookId: number) {
     setError(null);
     try {
       const detail = await getBook(bookId);
       setSelected(detail);
+      setTitleDraft(detail.title);
       if (detail.status === "confirmed") {
         setProgress(await getBookProgress(bookId));
       } else {
@@ -77,6 +155,7 @@ export default function BooksPage() {
     try {
       const preview = await previewBook(file);
       setSelected(preview);
+      setTitleDraft(preview.title);
       setProgress([]);
       await load();
     } catch (err) {
@@ -86,16 +165,48 @@ export default function BooksPage() {
     }
   }
 
+  async function saveTitle() {
+    if (!selected || !titleDraft.trim()) {
+      return;
+    }
+    if (titleDraft.trim() === selected.title) {
+      return;
+    }
+    setSavingTitle(true);
+    setTitleSaved(false);
+    setError(null);
+    try {
+      const updated = await updateBookTitle(selected.id, titleDraft.trim());
+      setSelected(updated);
+      setTitleDraft(updated.title);
+      setBooks((rows) => rows.map((row) => (row.id === updated.id ? { ...row, ...updated } : row)));
+      setTitleSaved(true);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not save title");
+    } finally {
+      setSavingTitle(false);
+    }
+  }
+
   async function handleConfirm(coverageTarget: number) {
     if (!selected) {
+      return;
+    }
+    if (!titleDraft.trim()) {
+      setError("Enter a book name before confirming.");
       return;
     }
     setConfirming(true);
     setError(null);
     try {
-      const confirmed = await confirmBook(selected.id, coverageTarget);
+      const confirmed = await confirmBook(selected.id, coverageTarget, titleDraft.trim());
       setSelected(confirmed);
+      setTitleDraft(confirmed.title);
+      if (confirmed.status === "confirmed") {
+        setProgress(await getBookProgress(confirmed.id));
+      }
       await load();
+      assignSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not confirm book");
     } finally {
@@ -103,20 +214,21 @@ export default function BooksPage() {
     }
   }
 
-  async function handleAssign(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (!selected || assignId === "") {
+  async function handleAssign(learnerId: number) {
+    if (!selected) {
       return;
     }
+    setAssigningId(learnerId);
     setError(null);
     try {
-      const updated = await assignBook(selected.id, assignId);
-      setSelected(await getBook(updated.id));
-      setProgress(await getBookProgress(updated.id));
-      setAssignId("");
+      await assignBook(selected.id, learnerId);
+      setSelected(await getBook(selected.id));
+      setProgress(await getBookProgress(selected.id));
       await load();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not assign book");
+    } finally {
+      setAssigningId(null);
     }
   }
 
@@ -135,7 +247,16 @@ export default function BooksPage() {
     }
   }
 
-  async function handleDeletePreview(bookId: number) {
+  async function handleDelete(bookId: number, bookTitle: string) {
+    const label = bookTitle || "this book";
+    if (
+      !window.confirm(
+        `Delete "${label}"? Daily challenge will stop dripping these words. This cannot be undone.`,
+      )
+    ) {
+      return;
+    }
+    setDeletingId(bookId);
     setError(null);
     try {
       await deleteBook(bookId);
@@ -145,7 +266,9 @@ export default function BooksPage() {
       }
       await load();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not delete preview");
+      setError(err instanceof Error ? err.message : "Could not delete book");
+    } finally {
+      setDeletingId(null);
     }
   }
 
@@ -168,194 +291,333 @@ export default function BooksPage() {
 
   return (
     <PageShell variant="parent">
-      <main className="mx-auto flex min-h-screen max-w-5xl flex-col gap-6 p-6 sm:p-8">
+      <main className="mx-auto flex min-h-screen max-w-4xl flex-col gap-6 p-6 sm:p-8">
         <header className="flex flex-wrap items-start justify-between gap-4">
           <div>
             <p className="text-sm font-bold text-warm-muted">Parent</p>
-            <h1 className="text-3xl font-extrabold text-warm-brown">Books</h1>
+            <h1 className="text-3xl font-extrabold text-warm-brown">Books 📗</h1>
             <p className="mt-1 text-sm text-warm-brown-soft">
-              Upload a level-matched book. Daily challenge drips those words; bank retention stays
-              warm.
+              Upload → name & confirm → assign to a child. Their daily challenge drips book words;
+              bank retention stays warm.
             </p>
           </div>
-          <Link to="/parent/dashboard" className="text-sm font-semibold text-warm-link">
-            Dashboard
+          <Link to="/parent/dashboard" className="warm-btn warm-btn-secondary text-sm">
+            Back to dashboard
           </Link>
         </header>
 
-        <section className="warm-card p-6">
-          <h2 className="text-lg font-extrabold text-warm-brown">Upload</h2>
-          <p className="mt-1 text-sm text-warm-brown-soft">txt or epub. PDF comes later.</p>
-          <label className="warm-btn warm-btn-primary mt-4 inline-flex cursor-pointer text-sm">
-            {uploading ? "Parsing…" : "Choose file"}
-            <input
-              type="file"
-              accept=".txt,.epub,text/plain,application/epub+zip"
-              className="hidden"
-              disabled={uploading}
-              onChange={(event) => void handleUpload(event)}
-            />
-          </label>
+        <section className="warm-card p-4">
+          <ol className="flex flex-wrap gap-4 text-sm">
+            <li className={steps.upload ? "font-bold text-warm-brown" : "text-warm-muted"}>
+              1. Upload
+            </li>
+            <li className={steps.confirm ? "font-bold text-warm-brown" : "text-warm-muted"}>
+              2. Name & confirm
+            </li>
+            <li className={steps.assign ? "font-bold text-warm-coral" : "text-warm-muted"}>
+              3. Assign to child
+            </li>
+          </ol>
         </section>
 
-        {error && (
-          <p className="rounded-2xl bg-red-50 px-4 py-3 text-sm font-semibold text-red-700">{error}</p>
-        )}
+        {error && <p className="font-semibold text-red-600">{error}</p>}
 
-        {loading && <p className="text-sm font-semibold text-warm-muted">Loading books…</p>}
+        <section className="warm-card bg-gradient-to-br from-emerald-50/90 to-teal-50/90 p-6">
+          <div className="flex flex-wrap items-start gap-4">
+            <span className="text-4xl">📗</span>
+            <div className="min-w-0 flex-1">
+              <h2 className="text-xl font-extrabold text-warm-brown">Step 1 · Upload a book</h2>
+              <p className="mt-1 text-sm text-warm-body">
+                txt or epub — pick a book at your child&apos;s level. PDF comes later.
+              </p>
+              <label
+                className={`warm-btn warm-btn-primary mt-4 inline-flex cursor-pointer text-sm ${uploading ? "pointer-events-none opacity-60" : ""}`}
+              >
+                {uploading ? "Parsing…" : "Choose file"}
+                <input
+                  type="file"
+                  accept=".txt,.epub,text/plain,application/epub+zip"
+                  className="hidden"
+                  disabled={uploading}
+                  onChange={(event) => void handleUpload(event)}
+                />
+              </label>
+            </div>
+          </div>
+        </section>
 
-        <section className="grid gap-4 lg:grid-cols-2">
-          <div className="warm-card p-6">
-            <h2 className="text-lg font-extrabold text-warm-brown">Library</h2>
-            {books.length === 0 && !loading && (
-              <p className="mt-3 text-sm text-warm-brown-soft">No books yet.</p>
-            )}
-            <ul className="mt-3 divide-y divide-orange-100">
-              {books.map((book) => (
-                <li key={book.id}>
-                  <button
-                    type="button"
-                    onClick={() => void openBook(book.id)}
-                    className="flex w-full items-start justify-between gap-3 py-3 text-left"
-                  >
-                    <span>
-                      <span className="font-extrabold text-warm-brown">{book.title}</span>
-                      <span className="mt-1 block text-sm text-warm-brown-soft">
-                        {book.status === "confirmed" ? coverageLabel(book.coverage_target) : "Preview"}{" "}
-                        · {book.study_lemma_count.toLocaleString()} study words · ~
-                        {book.days_at_five_new} days at 5/day
-                      </span>
+        <section className="warm-card p-6">
+          <h2 className="text-lg font-extrabold text-warm-brown">Library</h2>
+          {loading && <p className="mt-4 text-sm text-warm-brown-soft">Loading books…</p>}
+          {!loading && books.length === 0 && (
+            <p className="mt-4 text-sm text-warm-brown-soft">
+              No books yet — upload a txt or epub to get started.
+            </p>
+          )}
+          <ul className="mt-4 space-y-2">
+            {books.map((book) => (
+              <li key={book.id} className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => void openBook(book.id)}
+                  className={`flex min-w-0 flex-1 items-start justify-between gap-3 rounded-2xl p-4 text-left transition ${
+                    selected?.id === book.id
+                      ? "bg-white/90 ring-2 ring-warm-coral/30"
+                      : "bg-white/70 hover:bg-white/90"
+                  }`}
+                >
+                  <span className="min-w-0">
+                    <span className="font-extrabold text-warm-brown">{book.title}</span>
+                    <span className="mt-1 block text-sm text-warm-brown-soft">
+                      {book.original_filename} · {book.study_lemma_count.toLocaleString()} study
+                      words
                     </span>
-                    <span className="text-sm font-semibold text-warm-muted">
+                  </span>
+                  <span className="flex shrink-0 flex-col items-end gap-2">
+                    {statusBadge(book.status, book.coverage_target)}
+                    <span className="text-xs font-semibold text-warm-muted">
                       {book.assigned_learner_ids.length} assigned
                     </span>
-                  </button>
-                </li>
-              ))}
-            </ul>
-          </div>
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  disabled={deletingId === book.id}
+                  onClick={() => void handleDelete(book.id, book.title)}
+                  className="shrink-0 self-center px-2 text-sm font-semibold text-red-600 disabled:opacity-50"
+                  title="Delete book"
+                >
+                  {deletingId === book.id ? "…" : "Delete"}
+                </button>
+              </li>
+            ))}
+          </ul>
+        </section>
 
-          {selected && (
-            <div className="warm-card p-6">
-              <h2 className="text-lg font-extrabold text-warm-brown">{selected.title}</h2>
+        {selected && (
+          <section className="warm-card p-6">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div className="min-w-0 flex-1">
+                <h2 className="text-lg font-extrabold text-warm-brown">
+                  Step 2 · Name &amp; confirm study set
+                </h2>
+                <div className="mt-2">{statusBadge(selected.status, selected.coverage_target)}</div>
+              </div>
+              <button
+                type="button"
+                disabled={deletingId === selected.id}
+                onClick={() => void handleDelete(selected.id, selected.title)}
+                className="text-sm font-semibold text-red-600 disabled:opacity-50"
+              >
+                {deletingId === selected.id ? "Deleting…" : "Delete book"}
+              </button>
+            </div>
+
+            <div className="mt-4 flex flex-wrap items-end gap-2">
+              <label className="min-w-[12rem] flex-1">
+                <span className="text-sm font-bold text-warm-muted">Book name</span>
+                <input
+                  className="warm-input mt-1 w-full"
+                  value={titleDraft}
+                  onChange={(event) => {
+                    setTitleDraft(event.target.value);
+                    setTitleSaved(false);
+                  }}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") {
+                      event.preventDefault();
+                      void saveTitle();
+                    }
+                  }}
+                  placeholder="Enter the book title"
+                />
+              </label>
+              <button
+                type="button"
+                disabled={savingTitle || !titleDraft.trim() || titleDraft.trim() === selected.title}
+                onClick={() => void saveTitle()}
+                className="warm-btn warm-btn-secondary text-sm"
+              >
+                {savingTitle ? "Saving…" : "Save"}
+              </button>
+            </div>
+            {titleSaved && (
+              <p className="mt-2 text-sm font-semibold text-emerald-700">Book name saved.</p>
+            )}
+            {selected.title_needs_review && (
+              <p className="mt-2 text-sm font-semibold text-amber-800">
+                We couldn&apos;t find a title in the file — please enter the book name above.
+              </p>
+            )}
+            {selected.title_source === "content" || selected.title_source === "metadata" ? (
               <p className="mt-2 text-sm text-warm-brown-soft">
-                {selected.token_count.toLocaleString()} tokens ·{" "}
-                {selected.content_lemma_count.toLocaleString()} content lemmas · skipped{" "}
-                {selected.skipped_function_words.toLocaleString()} function words and{" "}
-                {selected.skipped_proper_nouns.toLocaleString()} names
+                Name read from the book file. Edit if it looks wrong.
               </p>
-              <p className="mt-2 text-sm text-warm-body">
-                Coverage curve: 80% = {selected.coverage_curve["80"] ?? "—"} lemmas, 90% ={" "}
-                {selected.coverage_curve["90"] ?? "—"} lemmas
-              </p>
-              {(selected.baseline_match_count ?? 0) > 0 && (
-                <p className="mt-2 text-sm text-warm-body">
-                  {selected.baseline_match_count} already in the family word bank ·{" "}
-                  {selected.new_word_count} new
+            ) : null}
+            <p className="mt-1 text-xs text-warm-muted">File: {selected.original_filename}</p>
+
+            <div className="mt-4 grid gap-3 sm:grid-cols-2">
+              <article className="rounded-2xl bg-white/70 p-4">
+                <p className="text-xs font-bold uppercase tracking-wide text-warm-muted">Tokens</p>
+                <p className="mt-1 text-lg font-extrabold text-warm-brown">
+                  {selected.token_count.toLocaleString()}
                 </p>
-              )}
+              </article>
+              <article className="rounded-2xl bg-white/70 p-4">
+                <p className="text-xs font-bold uppercase tracking-wide text-warm-muted">
+                  Content lemmas
+                </p>
+                <p className="mt-1 text-lg font-extrabold text-warm-brown">
+                  {selected.content_lemma_count.toLocaleString()}
+                </p>
+              </article>
+              <article className="rounded-2xl bg-white/70 p-4">
+                <p className="text-xs font-bold uppercase tracking-wide text-warm-muted">
+                  Words at 80% (preview)
+                </p>
+                <p className="mt-1 text-lg font-extrabold text-warm-brown">
+                  {selected.coverage_curve["80"] ?? "—"} lemmas
+                </p>
+              </article>
+              <article className="rounded-2xl bg-white/70 p-4">
+                <p className="text-xs font-bold uppercase tracking-wide text-warm-muted">
+                  Words at 90% (preview)
+                </p>
+                <p className="mt-1 text-lg font-extrabold text-warm-brown">
+                  {selected.coverage_curve["90"] ?? "—"} lemmas
+                </p>
+              </article>
+            </div>
 
-              {selected.status === "preview" && (
-                <div className="mt-4 flex flex-wrap gap-2">
-                  <button
-                    type="button"
-                    disabled={confirming}
-                    onClick={() => void handleConfirm(0.8)}
-                    className="warm-btn warm-btn-primary text-sm"
-                  >
-                    Confirm 80% · read with help
-                  </button>
-                  <button
-                    type="button"
-                    disabled={confirming}
-                    onClick={() => void handleConfirm(0.9)}
-                    className="warm-btn text-sm"
-                  >
-                    Confirm 90% · read independently
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => void handleDeletePreview(selected.id)}
-                    className="warm-btn text-sm text-red-600"
-                  >
-                    Discard preview
-                  </button>
-                </div>
-              )}
+            {(selected.baseline_match_count ?? 0) > 0 && (
+              <p className="mt-4 text-sm text-warm-body">
+                {selected.baseline_match_count} already in the family word bank ·{" "}
+                {selected.new_word_count} new
+              </p>
+            )}
 
-              {selected.sample_study && selected.sample_study.length > 0 && (
-                <div className="mt-4">
-                  <p className="text-sm font-bold text-warm-muted">Study set sample</p>
-                  <ul className="mt-2 divide-y divide-orange-100">
-                    {selected.sample_study.slice(0, 20).map((row) => (
-                      <li key={row.id} className="flex items-center justify-between gap-3 py-2">
-                        <span className="text-sm text-warm-brown-soft">
-                          <span className="font-semibold text-warm-brown">{row.lemma}</span>
-                          {row.matched_baseline ? " · in bank" : ""}
-                          {row.is_hidden ? " · hidden" : ""}
-                        </span>
-                        {!row.is_hidden && (
-                          <button
-                            type="button"
-                            disabled={hidingLemmaId === row.id}
-                            onClick={() => void handleHideLemma(row.id, true)}
-                            className="text-xs font-semibold text-warm-muted hover:text-red-600"
-                          >
-                            {hidingLemmaId === row.id ? "…" : "Hide"}
-                          </button>
-                        )}
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              )}
+            {selected.status === "preview" && (
+              <div className="mt-6 rounded-2xl border border-amber-200 bg-amber-50/80 p-4">
+                <h3 className="text-sm font-bold text-amber-900">Confirm study set</h3>
+                <p className="mt-1 text-sm text-amber-900/80">
+                  The stats above are a preview only. Tap <strong>Confirm</strong> to lock in how
+                  many words to teach — then you can assign to a child below.
+                </p>
+                <ConfirmStudySetButtons
+                  confirming={confirming}
+                  titleDraft={titleDraft}
+                  onConfirm={(target) => void handleConfirm(target)}
+                />
+              </div>
+            )}
 
-              {selected.status === "confirmed" && (
+            {selected.status === "confirmed" && (
+              <p className="mt-4 rounded-2xl bg-emerald-50 px-4 py-3 text-sm font-semibold text-emerald-800">
+                Study set confirmed ({coverageLabel(selected.coverage_target).toLowerCase()}) —
+                scroll down to assign to a child.
+              </p>
+            )}
+
+            {selected.sample_study && selected.sample_study.length > 0 && selected.status === "preview" && (
+              <div className="mt-6">
+                <h3 className="text-sm font-bold text-warm-muted">Study set sample</h3>
+                <ul className="mt-2 divide-y divide-orange-100 rounded-2xl bg-white/70 px-4">
+                  {selected.sample_study.slice(0, 20).map((row) => (
+                    <li key={row.id} className="flex items-center justify-between gap-3 py-3">
+                      <span className="text-sm text-warm-brown-soft">
+                        <span className="font-semibold text-warm-brown">{row.lemma}</span>
+                        {row.matched_baseline ? " · in bank" : ""}
+                      </span>
+                      {!row.is_hidden && (
+                        <button
+                          type="button"
+                          disabled={hidingLemmaId === row.id}
+                          onClick={() => void handleHideLemma(row.id, true)}
+                          className="text-xs font-semibold text-warm-muted hover:text-red-600"
+                        >
+                          {hidingLemmaId === row.id ? "…" : "Hide"}
+                        </button>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            <div ref={assignSectionRef} className="mt-8 border-t border-orange-100 pt-6">
+              <h3 className="text-lg font-extrabold text-warm-brown">Step 3 · Assign to a child</h3>
+              {selected.status !== "confirmed" ? (
                 <>
-                  <form onSubmit={handleAssign} className="mt-4 flex flex-wrap gap-2">
-                    <select
-                      className="warm-input max-w-xs"
-                      value={assignId}
-                      onChange={(event) =>
-                        setAssignId(event.target.value ? Number(event.target.value) : "")
-                      }
-                    >
-                      <option value="">Select learner</option>
-                      {learners.map((learner) => (
-                        <option key={learner.id} value={learner.id}>
-                          {learner.display_name} · {learner.english_level}
-                        </option>
-                      ))}
-                    </select>
-                    <button type="submit" className="warm-btn warm-btn-primary text-sm">
-                      Make active book
-                    </button>
-                  </form>
-                  <ul className="mt-3 divide-y divide-orange-100">
-                    {selected.assigned_learner_ids.map((learnerId) => {
-                      const learner = learners.find((row) => row.id === learnerId);
-                      const row = progress.find((item) => item.learner_id === learnerId);
+                  <p className="mt-2 text-sm text-amber-800">
+                    Assignment unlocks after you confirm the study set. The &ldquo;80%&rdquo; number
+                    in the stats is only a preview — tap one of the Confirm buttons above.
+                  </p>
+                  <ConfirmStudySetButtons
+                    confirming={confirming}
+                    titleDraft={titleDraft}
+                    onConfirm={(target) => void handleConfirm(target)}
+                  />
+                </>
+              ) : learners.length === 0 ? (
+                <p className="mt-2 text-sm text-warm-brown-soft">
+                  No active learners —{" "}
+                  <Link to="/parent/learners" className="text-warm-link underline">
+                    add a learner
+                  </Link>{" "}
+                  first.
+                </p>
+              ) : (
+                <>
+                  <p className="mt-2 text-sm text-warm-brown-soft">
+                    Tap a child to make this their active book. Daily challenge will drip new words
+                    from this book.
+                  </p>
+                  <ul className="mt-4 space-y-2">
+                    {learners.map((learner) => {
+                      const isAssigned = selected.assigned_learner_ids.includes(learner.id);
+                      const row = progress.find((item) => item.learner_id === learner.id);
                       return (
-                        <li key={learnerId} className="flex items-center justify-between gap-3 py-3">
-                          <span>
-                            <span className="font-semibold text-warm-brown">
-                              {learner?.display_name ?? `Learner #${learnerId}`}
-                            </span>
-                            {row && (
-                              <span className="mt-1 block text-sm text-warm-brown-soft">
-                                Book progress {row.study_progress_percent}% · Page coverage{" "}
-                                {row.page_coverage_percent}%
-                                {row.ready_to_read ? " · ready to read" : ""}
+                        <li
+                          key={learner.id}
+                          className="flex flex-wrap items-center justify-between gap-3 rounded-2xl bg-white/70 p-4"
+                        >
+                          <div className="flex min-w-0 items-center gap-3">
+                            <LearnerAvatar learner={learner} size="sm" />
+                            <span>
+                              <span className="font-semibold text-warm-brown">
+                                {learner.display_name}
                               </span>
-                            )}
-                          </span>
-                          <button
-                            type="button"
-                            onClick={() => void handleUnassign(learnerId)}
-                            className="text-sm font-semibold text-red-600"
-                          >
-                            Close book
-                          </button>
+                              <span className="mt-1 block text-sm text-warm-brown-soft">
+                                {learner.english_level}
+                                {row && (
+                                  <>
+                                    {" "}
+                                    · Book progress {row.study_progress_percent}% · Page coverage{" "}
+                                    {row.page_coverage_percent}%
+                                    {row.ready_to_read ? " · ready to read ✓" : ""}
+                                  </>
+                                )}
+                              </span>
+                            </span>
+                          </div>
+                          {isAssigned ? (
+                            <button
+                              type="button"
+                              onClick={() => void handleUnassign(learner.id)}
+                              className="warm-btn warm-btn-secondary text-sm text-red-700"
+                            >
+                              Close book
+                            </button>
+                          ) : (
+                            <button
+                              type="button"
+                              disabled={assigningId === learner.id}
+                              onClick={() => void handleAssign(learner.id)}
+                              className="warm-btn warm-btn-primary text-sm"
+                            >
+                              {assigningId === learner.id ? "Assigning…" : "Assign to this child"}
+                            </button>
+                          )}
                         </li>
                       );
                     })}
@@ -363,8 +625,8 @@ export default function BooksPage() {
                 </>
               )}
             </div>
-          )}
-        </section>
+          </section>
+        )}
       </main>
     </PageShell>
   );

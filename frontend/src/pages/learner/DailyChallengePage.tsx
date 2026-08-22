@@ -306,12 +306,8 @@ export default function DailyChallengePage() {
   }, [phase, session, mistakesMode, mistakeEntryIds, finishSession]);
 
   const currentCard = cards[index];
-  const { choices: definitionChoices, clearZhForEntry } = useLazyDefinitionChoices(
-    cards,
-    index,
-    setCards,
-    shuffleKey,
-  );
+  const { choices: definitionChoices, clearZhForEntry, loadingDefinitions, definitionUnavailable } =
+    useLazyDefinitionChoices(cards, index, setCards, shuffleKey);
 
   function handleZhCleared(entryId: number) {
     clearZhForEntry(entryId);
@@ -702,10 +698,35 @@ export default function DailyChallengePage() {
 
           {currentCard && (
             <>
+              {loadingDefinitions && !revealed && (
+                <p className="text-center text-sm font-semibold text-warm-muted">
+                  Loading meanings…
+                </p>
+              )}
+              {definitionUnavailable && !revealed && (
+                <div className="rounded-2xl border border-amber-200 bg-amber-50/90 px-4 py-3 text-center text-sm text-warm-brown">
+                  <p className="font-semibold">
+                    No dictionary meaning for &ldquo;{currentCard.dictionary_entry.word}&rdquo;
+                  </p>
+                  <p className="mt-1 text-warm-brown-soft">
+                    This word may be a book typo — skip it to keep going.
+                  </p>
+                  <button
+                    type="button"
+                    className="warm-btn warm-btn-secondary mt-3 text-sm"
+                    disabled={submitting}
+                    onClick={() => void handleRate(1)}
+                  >
+                    Skip this word
+                  </button>
+                </div>
+              )}
               <FlashcardDeck
                 card={currentCard}
                 revealed={revealed}
-                definitionChoices={definitionChoices}
+                definitionChoices={
+                  loadingDefinitions || definitionUnavailable ? [] : definitionChoices
+                }
                 pickFeedback={pickFeedback}
                 onPickDefinition={handlePickDefinition}
                 showAudio={false}

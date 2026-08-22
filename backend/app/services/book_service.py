@@ -7,7 +7,7 @@ import math
 from datetime import UTC, datetime
 
 from fastapi import HTTPException, UploadFile, status
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -21,7 +21,7 @@ from app.services.book_analysis import (
     DEFAULT_COVERAGE_TARGET,
     analyze_text,
     extract_book_text,
-    title_from_filename,
+    extract_book_title,
 )
 from app.services.dictionary_service import is_placeholder_definition, normalize_word
 
@@ -121,9 +121,11 @@ async def preview_upload(db: AsyncSession, *, parent_id: int, upload: UploadFile
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No text found in file")
 
     analysis = analyze_text(text, coverage_target=DEFAULT_COVERAGE_TARGET)
+    title, title_source = extract_book_title(filename=filename, data=data, text=text)
     book = Book(
         parent_id=parent_id,
-        title=title_from_filename(filename),
+        title=title,
+        title_source=title_source,
         original_filename=filename,
         status="preview",
         coverage_target=DEFAULT_COVERAGE_TARGET,
@@ -159,11 +161,26 @@ async def preview_upload(db: AsyncSession, *, parent_id: int, upload: UploadFile
 
 
 async def confirm_book(
-    db: AsyncSession, *, parent_id: int, book_id: int, coverage_target: float | None = None
+    db: AsyncSession,
+    *,
+    parent_id: int,
+    book_id: int,
+    coverage_target: float | None = None,
+    title: str | None = None,
 ) -> Book:
     book = await _get_book_for_parent(db, book_id, parent_id)
     if book.status == "confirmed" and book.word_list_id is not None:
         return book
+
+    if title is not None:
+        cleaned = title.strip()
+        if not cleaned:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Book title cannot be empty",
+            )
+        book.title = cleaned[:255]
+        book.title_source = "manual"
 
     target = _normalize_coverage(
         coverage_target if coverage_target is not None else book.coverage_target
@@ -223,15 +240,43 @@ async def _resolve_entry(db: AsyncSession, lemma: str) -> DictionaryEntry:
     return entry
 
 
-async def delete_preview(db: AsyncSession, *, parent_id: int, book_id: int) -> None:
-    book = await _get_book_for_parent(db, book_id, parent_id)
-    if book.status != "preview":
+async def update_book_title(
+    db: AsyncSession, *, parent_id: int, book_id: int, title: str
+) -> Book:
+    cleaned = title.strip()
+    if not cleaned:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Only preview books can be deleted",
+            detail="Book title cannot be empty",
         )
+    book = await _get_book_for_parent(db, book_id, parent_id)
+    book.title = cleaned[:255]
+    book.title_source = "manual"
+    if book.word_list_id is not None:
+        word_list = await db.get(WordList, book.word_list_id)
+        if word_list is not None:
+            word_list.name = book.title
+    await db.commit()
+    return await _get_book_for_parent(db, book.id, parent_id)
+
+
+async def delete_book(db: AsyncSession, *, parent_id: int, book_id: int) -> None:
+    book = await _get_book_for_parent(db, book_id, parent_id)
+    if book.word_list_id is not None:
+        list_id = book.word_list_id
+        await db.execute(
+            delete(WordListAssignment).where(WordListAssignment.word_list_id == list_id)
+        )
+        await db.execute(delete(WordListItem).where(WordListItem.word_list_id == list_id))
+        word_list = await db.get(WordList, list_id)
+        if word_list is not None:
+            await db.delete(word_list)
     await db.delete(book)
     await db.commit()
+
+
+async def delete_preview(db: AsyncSession, *, parent_id: int, book_id: int) -> None:
+    await delete_book(db, parent_id=parent_id, book_id=book_id)
 
 
 async def list_books(db: AsyncSession, parent_id: int) -> list[Book]:
@@ -445,6 +490,9 @@ async def progress_for_learner(db: AsyncSession, book: Book, learner_id: int) ->
     page_known = len(known & content_ids) if content_ids else 0
     study_progress = (study_known / study_total) if study_total else 0.0
     page_coverage = (page_known / content_total) if content_total else 0.0
+    strength = await loop_engine.strength_counts_for_entry_ids(
+        db, learner_id=learner_id, entry_ids=study_ids
+    )
     return {
         "learner_id": learner_id,
         "study_known": study_known,
@@ -455,6 +503,9 @@ async def progress_for_learner(db: AsyncSession, book: Book, learner_id: int) ->
         "page_coverage_percent": round(page_coverage * 100, 1),
         "ready_to_read": page_coverage >= 0.80,
         "days_estimate": math.ceil(max(0, study_total - study_known) / 5) if study_total else 0,
+        "learning_count": strength["learning"],
+        "familiar_count": strength["familiar"],
+        "mastered_count": strength["mastered"],
     }
 
 
@@ -464,6 +515,8 @@ def book_to_summary(book: Book, *, assigned_learner_ids: list[int] | None = None
     return {
         "id": book.id,
         "title": book.title,
+        "title_source": getattr(book, "title_source", "filename"),
+        "title_needs_review": getattr(book, "title_source", "filename") == "filename",
         "original_filename": book.original_filename,
         "status": book.status,
         "coverage_target": book.coverage_target,

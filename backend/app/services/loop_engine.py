@@ -216,6 +216,31 @@ async def strength_counts_for_level(
     return {"bank_total": bank_total, **buckets}
 
 
+async def strength_counts_for_entry_ids(
+    db: AsyncSession,
+    *,
+    learner_id: int,
+    entry_ids: set[int],
+) -> dict[str, int]:
+    """Strength buckets for a fixed entry set (e.g. book study lemmas)."""
+    bank_total = len(entry_ids)
+    if not entry_ids:
+        return _empty_strength_counts()
+
+    cards_result = await db.execute(
+        select(SrsCard).where(
+            SrsCard.learner_id == learner_id,
+            SrsCard.dictionary_entry_id.in_(entry_ids),
+            SrsCard.released_at.is_not(None),
+        )
+    )
+    cards = list(cards_result.scalars().all())
+    card_ids = [card.id for card in cards if card.id is not None]
+    distinct_days_map = await distinct_review_days_by_card(db, card_ids)
+    buckets = _bucket_strength_counts(cards, distinct_days_map)
+    return {"bank_total": bank_total, **buckets}
+
+
 async def strength_counts_overall(
     db: AsyncSession,
     *,
@@ -257,6 +282,27 @@ async def strength_counts_overall(
     )
     buckets = _bucket_strength_counts(cards, distinct_days_map)
     return {"bank_total": bank_total, **buckets}
+
+
+async def strength_counts_released(db: AsyncSession, *, learner_id: int) -> dict[str, int]:
+    """Strength buckets for every released card (bank, book, lists — matches My words)."""
+    cards_result = await db.execute(
+        select(SrsCard).where(
+            SrsCard.learner_id == learner_id,
+            SrsCard.released_at.is_not(None),
+        )
+    )
+    cards = list(cards_result.scalars().all())
+    if not cards:
+        counts = _empty_strength_counts()
+        counts["bank_total"] = 0
+        return counts
+
+    distinct_days_map = await distinct_review_days_by_card(
+        db, [card.id for card in cards if card.id is not None]
+    )
+    buckets = _bucket_strength_counts(cards, distinct_days_map)
+    return {"bank_total": len(cards), **buckets}
 
 
 def default_new_goal(learner: Learner) -> int:
@@ -386,22 +432,38 @@ async def _ensure_unreleased_card(
         )
     )
     card = result.scalar_one_or_none()
-    if card is None:
-        card = SrsCard(
-            learner_id=learner_id,
-            dictionary_entry_id=entry_id,
-            word_list_id=word_list_id,
-            ease_factor=DEFAULT_EASE_FACTOR,
-            interval_days=0,
-            repetitions=0,
-            due_at=_far_future(now),
-            state="new",
-            released_at=None,
+    if card is not None:
+        if card.released_at is None:
+            card.due_at = _far_future(now)
+            card.word_list_id = word_list_id
+        return card
+
+    card = SrsCard(
+        learner_id=learner_id,
+        dictionary_entry_id=entry_id,
+        word_list_id=word_list_id,
+        ease_factor=DEFAULT_EASE_FACTOR,
+        interval_days=0,
+        repetitions=0,
+        due_at=_far_future(now),
+        state="new",
+        released_at=None,
+    )
+    db.add(card)
+    try:
+        async with db.begin_nested():
+            await db.flush()
+    except IntegrityError:
+        result = await db.execute(
+            select(SrsCard).where(
+                SrsCard.learner_id == learner_id,
+                SrsCard.dictionary_entry_id == entry_id,
+            )
         )
-        db.add(card)
-    elif card.released_at is None:
-        card.due_at = _far_future(now)
-        card.word_list_id = word_list_id
+        card = result.scalar_one()
+        if card.released_at is None:
+            card.due_at = _far_future(now)
+            card.word_list_id = word_list_id
     return card
 
 
@@ -564,18 +626,16 @@ async def release_new_words(
         if len(released) >= remaining:
             break
         if card is None:
-            card = SrsCard(
+            card = await _ensure_unreleased_card(
+                db,
                 learner_id=learner.id,
-                dictionary_entry_id=entry_id,
+                entry_id=entry_id,
                 word_list_id=release_list_id,
-                ease_factor=DEFAULT_EASE_FACTOR,
-                interval_days=0,
-                repetitions=0,
-                due_at=now,
-                state="new",
-                released_at=now,
+                now=now,
             )
-            db.add(card)
+            card.due_at = now
+            card.released_at = now
+            card.word_list_id = release_list_id
             released.append(card)
         else:
             card.due_at = now
@@ -1181,6 +1241,14 @@ async def build_daily_mix(
         cards_by_id = {card.id: card for card in loaded.scalars().all()}
         cards = [cards_by_id[card_id] for card_id in card_ids if card_id in cards_by_id]
 
+    if cards:
+        from app.services import dictionary_service as dictionary_svc
+
+        mix_entries = [
+            card.dictionary_entry for card in cards if card.dictionary_entry is not None
+        ]
+        await dictionary_svc.prefetch_challenge_definitions(db, mix_entries)
+
     await srs_service.enrich_cards_zh_hant(db, cards)
     mix = {
         "cards": [srs_service.card_to_dict(card) for card in cards],
@@ -1204,6 +1272,10 @@ async def build_daily_mix(
         "study_progress_percent": None,
         "page_coverage_percent": None,
         "ready_to_read": None,
+        "book_study_total": None,
+        "book_learning_count": None,
+        "book_familiar_count": None,
+        "book_mastered_count": None,
     }
     if auto_book or (log.source_kind == "book"):
         from app.services import book_service
@@ -1215,6 +1287,10 @@ async def build_daily_mix(
             mix["study_progress_percent"] = progress["study_progress_percent"]
             mix["page_coverage_percent"] = progress["page_coverage_percent"]
             mix["ready_to_read"] = progress["ready_to_read"]
+            mix["book_study_total"] = progress["study_total"]
+            mix["book_learning_count"] = progress["learning_count"]
+            mix["book_familiar_count"] = progress["familiar_count"]
+            mix["book_mastered_count"] = progress["mastered_count"]
     return mix
 
 
@@ -1509,12 +1585,18 @@ async def progress_summary(
             )
             bank_total = total_result.scalar_one()
 
+    released_counts = await strength_counts_released(db, learner_id=learner_id)
+
     challenge_log = await get_today_challenge_log(db, learner_id=learner_id, now=now)
 
     return {
         "learning_count": learning,
         "familiar_count": familiar,
         "mastered_count": mastered,
+        "released_learning_count": released_counts["learning"],
+        "released_familiar_count": released_counts["familiar"],
+        "released_mastered_count": released_counts["mastered"],
+        "released_total": released_counts["bank_total"],
         "due_count": due_count,
         "new_released_today": released_today,
         "daily_new_goal": new_goal,
@@ -1577,12 +1659,15 @@ async def list_learner_words(
             "page_size": page_size,
             "total_pages": 0,
             "by_level": {},
+            "by_bank_level": {},
+            "by_book": {},
             "by_category": {},
             "by_strength": {"learning": 0, "familiar": 0, "mastered": 0},
         }
 
     entry_ids = [card.dictionary_entry_id for card in cards]
     bank_items_by_entry: dict[int, WordListItem] = {}
+    bank: WordList | None = None
     if parent_id is not None:
         bank = await get_family_bank(db, parent_id)
         if bank is not None:
@@ -1597,6 +1682,31 @@ async def list_learner_words(
             for item in items_result.scalars().all():
                 bank_items_by_entry[item.dictionary_entry_id] = item
 
+    list_ids = {
+        card.word_list_id for card in cards if card.word_list_id is not None and card.word_list_id
+    }
+    if bank is not None:
+        list_ids.discard(bank.id)
+    book_list_names: dict[int, str] = {}
+    if list_ids:
+        lists_result = await db.execute(
+            select(WordList.id, WordList.name).where(
+                WordList.id.in_(list_ids),
+                WordList.source == "book",
+            )
+        )
+        book_list_names = {row.id: row.name for row in lists_result.all()}
+
+    book_entry_labels: dict[int, str] = {}
+    from app.services import book_service
+
+    active_book = await book_service.get_active_book_for_learner(db, learner.id)
+    if active_book is not None and active_book.word_list_id is not None:
+        for entry_id in await book_service.study_entry_ids(db, active_book):
+            book_entry_labels[entry_id] = active_book.title
+
+    book_title_set = set(book_entry_labels.values()) | set(book_list_names.values())
+
     distinct_days_map = await distinct_review_days_by_card(
         db, [card.id for card in cards if card.id]
     )
@@ -1608,15 +1718,27 @@ async def list_learner_words(
             continue
         item = bank_items_by_entry.get(card.dictionary_entry_id)
         categories = item_category_names(item) if item is not None else []
-        item_level = item.level if item is not None else None
+        book_from_card = (
+            book_list_names.get(card.word_list_id) if card.word_list_id is not None else None
+        )
+        book_from_study = book_entry_labels.get(card.dictionary_entry_id)
+        book_label = book_from_card or book_from_study
+        bank_level = (item.level or "").strip() if item is not None and item.level else None
+        level_tags: list[str] = []
+        if bank_level:
+            level_tags.append(bank_level)
+        if book_label and book_label not in level_tags:
+            level_tags.append(book_label)
         card_strength = strength_for_card(card, distinct_days_map) or "new"
         released = card.released_at
         rows.append(
             {
                 "card_id": card.id,
+                "dictionary_entry_id": entry.id,
                 "word": entry.word,
                 "definition": entry.definition,
-                "level": item_level,
+                "level": " · ".join(level_tags) if level_tags else None,
+                "levels": level_tags,
                 "categories": categories,
                 "strength": card_strength,
                 "distinct_review_days": distinct_days_map.get(card.id, 0) if card.id else 0,
@@ -1628,11 +1750,21 @@ async def list_learner_words(
         )
 
     by_level: dict[str, int] = {}
+    by_bank_level: dict[str, int] = {}
+    by_book: dict[str, int] = {}
     by_category: dict[str, int] = {}
     by_strength = {"learning": 0, "familiar": 0, "mastered": 0, "new": 0}
     for row in rows:
-        lvl = row["level"] or "unknown"
-        by_level[lvl] = by_level.get(lvl, 0) + 1
+        tags = row["levels"]
+        bank_tag = next((tag for tag in tags if tag not in book_title_set), None)
+        book_tag = next((tag for tag in tags if tag in book_title_set), None)
+        if bank_tag:
+            by_bank_level[bank_tag] = by_bank_level.get(bank_tag, 0) + 1
+        if book_tag:
+            by_book[book_tag] = by_book.get(book_tag, 0) + 1
+        # One bucket per word for combined summaries (bank tag wins over book).
+        facet_key = bank_tag or book_tag or "unknown"
+        by_level[facet_key] = by_level.get(facet_key, 0) + 1
         strength_key = row["strength"]
         if strength_key in by_strength:
             by_strength[strength_key] = by_strength.get(strength_key, 0) + 1
@@ -1652,7 +1784,12 @@ async def list_learner_words(
         ]
     if level and level.strip():
         level_key = level.strip().lower()
-        filtered = [row for row in filtered if (row["level"] or "").lower() == level_key]
+        filtered = [
+            row
+            for row in filtered
+            if any(tag.lower() == level_key for tag in (row["levels"] or []))
+            or (not row["levels"] and (row.get("level") or "unknown").lower() == level_key)
+        ]
     if category and category.strip():
         category_name = format_category_name(category.strip()).lower()
         filtered = [
@@ -1670,13 +1807,41 @@ async def list_learner_words(
     offset = (page - 1) * page_size
     page_items = filtered[offset : offset + page_size]
 
+    if page_items:
+        from app.models.dictionary import DictionaryEntry
+        from app.services import dictionary_service
+
+        page_entry_ids = [
+            row["dictionary_entry_id"]
+            for row in page_items
+            if row.get("dictionary_entry_id")
+        ]
+        if page_entry_ids:
+            entries_result = await db.execute(
+                select(DictionaryEntry).where(DictionaryEntry.id.in_(page_entry_ids))
+            )
+            page_entries = list(entries_result.scalars().all())
+            await dictionary_service.prefetch_challenge_definitions(db, page_entries)
+            definitions_by_id = {entry.id: entry.definition for entry in page_entries}
+            for row in page_items:
+                entry_id = row.get("dictionary_entry_id")
+                if entry_id in definitions_by_id:
+                    row["definition"] = definitions_by_id[entry_id]
+
+    items = [
+        {key: value for key, value in row.items() if key != "dictionary_entry_id"}
+        for row in page_items
+    ]
+
     return {
-        "items": page_items,
+        "items": items,
         "total": total,
         "page": page,
         "page_size": page_size,
         "total_pages": total_pages,
         "by_level": by_level,
+        "by_bank_level": by_bank_level,
+        "by_book": by_book,
         "by_category": by_category,
         "by_strength": by_strength,
     }

@@ -12,6 +12,7 @@ from app.schemas.book import (
     BookListResponse,
     BookProgress,
     BookSummary,
+    BookUpdateRequest,
 )
 from app.services import book_service
 
@@ -50,7 +51,21 @@ async def delete_book(
     parent: User = Depends(require_parent),
     db: AsyncSession = Depends(get_db),
 ) -> None:
-    await book_service.delete_preview(db, parent_id=parent.id, book_id=book_id)
+    await book_service.delete_book(db, parent_id=parent.id, book_id=book_id)
+
+
+@router.patch("/{book_id}", response_model=BookSummary)
+async def update_book(
+    book_id: int,
+    payload: BookUpdateRequest,
+    parent: User = Depends(require_parent),
+    db: AsyncSession = Depends(get_db),
+) -> BookSummary:
+    book = await book_service.update_book_title(
+        db, parent_id=parent.id, book_id=book_id, title=payload.title
+    )
+    assigned = await book_service.assigned_learner_ids(db, book)
+    return BookSummary(**book_service.book_to_preview(book, assigned_learner_ids=assigned))
 
 
 @router.get("/{book_id}", response_model=BookSummary)
@@ -72,7 +87,11 @@ async def confirm_book(
     db: AsyncSession = Depends(get_db),
 ) -> BookSummary:
     book = await book_service.confirm_book(
-        db, parent_id=parent.id, book_id=book_id, coverage_target=payload.coverage_target
+        db,
+        parent_id=parent.id,
+        book_id=book_id,
+        coverage_target=payload.coverage_target,
+        title=payload.title,
     )
     assigned = await book_service.assigned_learner_ids(db, book)
     return BookSummary(**book_service.book_to_preview(book, assigned_learner_ids=assigned))
