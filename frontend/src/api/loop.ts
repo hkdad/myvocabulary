@@ -37,6 +37,10 @@ export type DailyMix = {
   source_kind?: string | null;
   source_ref?: string | null;
   can_regenerate?: boolean;
+  book_title?: string | null;
+  study_progress_percent?: number | null;
+  page_coverage_percent?: number | null;
+  ready_to_read?: boolean | null;
 };
 
 export type ChallengeSourceOptions = {

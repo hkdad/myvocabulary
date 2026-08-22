@@ -261,6 +261,138 @@ async def fetch_from_api(word: str) -> dict:
         return await _fetch_fallback(word)
 
 
+def is_placeholder_definition(entry: DictionaryEntry) -> bool:
+    definition = (entry.definition or "").strip()
+    return entry.source == "placeholder" or definition.startswith("Definition pending")
+
+
+def _parse_kid_definition_json(text: str, word: str) -> dict | None:
+    cleaned = text.strip()
+    if not cleaned:
+        return None
+    fence = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", cleaned, re.DOTALL)
+    candidate = fence.group(1) if fence else cleaned
+    match = re.search(r"\{.*\}", candidate, re.DOTALL)
+    if not match:
+        return None
+    try:
+        payload = json.loads(match.group(0))
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    definition = str(payload.get("definition") or "").strip()
+    if not definition:
+        return None
+    return {
+        "word": normalize_word(word),
+        "part_of_speech": str(payload.get("pos") or payload.get("part_of_speech") or "").strip()
+        or None,
+        "definition": definition,
+        "example_sentence": str(
+            payload.get("example") or payload.get("example_sentence") or ""
+        ).strip()
+        or None,
+        "source": "ollama",
+        "fetched_at": datetime.now(UTC),
+    }
+
+
+async def generate_kid_definition(word: str) -> dict | None:
+    """Kid-friendly gloss via local Ollama, then OpenAI-compatible chat. None on failure."""
+    settings = get_settings()
+    api_base = settings.openai_api_base.rstrip("/")
+    is_ollama = ":11434" in api_base or api_base.startswith("http://127.0.0.1:11434")
+    if not is_ollama and not settings.openai_api_key:
+        return None
+
+    prompt = (
+        "Write a kid-friendly English dictionary entry. "
+        'Reply with JSON only: {"word":"...","pos":"...","definition":"...","example":"..."}. '
+        "Short definition a child can understand. One simple example sentence. "
+        f"Word: {word}"
+    )
+    ollama_root = api_base[: -len("/v1")] if api_base.endswith("/v1") else api_base
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            if is_ollama:
+                gen = await client.post(
+                    f"{ollama_root}/api/generate",
+                    json={
+                        "model": settings.openai_model,
+                        "prompt": prompt,
+                        "stream": False,
+                        "options": {"temperature": 0.2, "num_predict": 120},
+                    },
+                )
+                if gen.status_code == 200:
+                    parsed = _parse_kid_definition_json(str(gen.json().get("response") or ""), word)
+                    if parsed:
+                        return parsed
+            if settings.openai_api_key:
+                response = await client.post(
+                    f"{api_base}/chat/completions",
+                    headers={"Authorization": f"Bearer {settings.openai_api_key}"},
+                    json={
+                        "model": settings.openai_model,
+                        "messages": [
+                            {
+                                "role": "system",
+                                "content": (
+                                    "You write kid-friendly English dictionary entries as JSON."
+                                ),
+                            },
+                            {"role": "user", "content": prompt},
+                        ],
+                        "temperature": 0.2,
+                        "max_tokens": 256,
+                    },
+                    timeout=8.0,
+                )
+                response.raise_for_status()
+                message = response.json()["choices"][0]["message"]
+                content = str(message.get("content") or "")
+                parsed = _parse_kid_definition_json(content, word)
+                if parsed:
+                    parsed["source"] = "openai"
+                    return parsed
+    except Exception:
+        return None
+    return None
+
+
+async def fill_placeholder_definition(db: AsyncSession, entry: DictionaryEntry) -> DictionaryEntry:
+    """Fill a placeholder gloss before a card is shown. Never raises."""
+    if not is_placeholder_definition(entry):
+        return entry
+    payload = await generate_kid_definition(entry.word)
+    if payload is None:
+        try:
+            payload = await fetch_from_api(entry.word)
+        except Exception:
+            return entry
+    if not payload or not payload.get("definition"):
+        return entry
+    entry.definition = payload["definition"]
+    if payload.get("part_of_speech"):
+        entry.part_of_speech = payload["part_of_speech"]
+    if payload.get("example_sentence"):
+        entry.example_sentence = payload["example_sentence"]
+    if payload.get("phonetic"):
+        entry.phonetic = payload["phonetic"]
+    entry.source = payload.get("source") or entry.source
+    entry.source_url = payload.get("source_url") or entry.source_url
+    entry.fetched_at = payload.get("fetched_at") or datetime.now(UTC)
+    await db.flush()
+    return entry
+
+
+async def prefetch_challenge_definitions(db: AsyncSession, entries: list[DictionaryEntry]) -> None:
+    for entry in entries:
+        if is_placeholder_definition(entry):
+            await fill_placeholder_definition(db, entry)
+
+
 _CJK_RE = re.compile(r"[\u3400-\u9FFF]+")
 _PLACEHOLDER_ZH = {"...", "…", "—", "-", "<gloss>", "TRANSLATION_HERE"}
 

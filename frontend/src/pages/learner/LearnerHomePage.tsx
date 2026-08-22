@@ -203,6 +203,24 @@ export default function LearnerHomePage() {
           </div>
         </section>
 
+        {dailyMix?.book_title && (
+          <section className="warm-card p-6">
+            <p className="text-sm font-bold text-warm-muted">Book progress</p>
+            <h2 className="mt-1 text-lg font-extrabold text-warm-brown">{dailyMix.book_title}</h2>
+            <div className="mt-4 h-3 overflow-hidden rounded-full bg-orange-100">
+              <div
+                className="h-full rounded-full bg-gradient-to-r from-emerald-400 to-teal-300"
+                style={{ width: `${Math.min(100, dailyMix.study_progress_percent ?? 0)}%` }}
+              />
+            </div>
+            <p className="mt-2 text-sm text-warm-body">
+              Study set {dailyMix.study_progress_percent ?? 0}% known · page coverage{" "}
+              {dailyMix.page_coverage_percent ?? 0}%
+              {dailyMix.ready_to_read ? " · ready to read with help" : ""}
+            </p>
+          </section>
+        )}
+
         <LevelProgressCard
           englishLevel={stats?.english_level ?? learner?.english_level ?? "A1"}
         />

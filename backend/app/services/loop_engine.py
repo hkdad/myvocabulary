@@ -23,6 +23,7 @@ from app.models.word_list import WordList, WordListItem
 from app.services import srs_service
 
 PLACEHOLDER_DEFINITION = "Definition pending — added from family word bank."
+_UNSET = object()
 
 FAMILIAR_MIN_DISTINCT_DAYS = 2  # 2 distinct review days
 MASTERED_MIN_DISTINCT_DAYS = 3  # 3+ distinct review days
@@ -938,11 +939,34 @@ async def build_daily_mix(
     ignore_daily_cap: bool = False,
     source_kind: str | None = None,
     source_ref: str | None = None,
+    retention_entry_id_allowlist: object = _UNSET,
 ) -> dict:
     if now is None:
         now = datetime.now(UTC)
 
     await reconcile_mismatched_bank_cards(db, learner=learner, parent_id=parent_id, now=now)
+
+    auto_book = False
+    if entry_id_allowlist is None and source_word_list_id is None:
+        from app.services import book_service
+
+        active_book = await book_service.get_active_book_for_learner(db, learner.id)
+        if active_book is not None and active_book.word_list_id is not None:
+            study_ids = await book_service.study_entry_ids(db, active_book)
+            if study_ids:
+                auto_book = True
+                entry_id_allowlist = study_ids
+                source_word_list_id = active_book.word_list_id
+                source_kind = source_kind or "book"
+                source_ref = source_ref or str(active_book.word_list_id)
+                if retention_entry_id_allowlist is _UNSET:
+                    retention_entry_id_allowlist = None
+
+    drip_allowlist = entry_id_allowlist
+    if retention_entry_id_allowlist is _UNSET:
+        retention_allowlist: set[int] | None = entry_id_allowlist
+    else:
+        retention_allowlist = retention_entry_id_allowlist  # type: ignore[assignment]
 
     learner_id = learner.id  # cache scalar — session objects get expired on rollback
     new_goal = learner.daily_new_word_goal or default_new_goal(learner)
@@ -969,20 +993,30 @@ async def build_daily_mix(
         parent_id=parent_id,
         now=now,
         daily_cap=challenge_cap,
-        entry_id_allowlist=entry_id_allowlist,
+        entry_id_allowlist=drip_allowlist,
         ignore_daily_cap=ignore_daily_cap,
         source_word_list_id=source_word_list_id,
         shuffle_salt=shuffle_salt,
     )
     released_today = await list_released_today(db, learner_id=learner.id, now=now)
-    if entry_id_allowlist is not None:
+    if drip_allowlist is not None:
         released_today = [
-            card for card in released_today if card.dictionary_entry_id in entry_id_allowlist
+            card for card in released_today if card.dictionary_entry_id in drip_allowlist
         ]
+    if auto_book or source_kind == "book":
+        from app.services import dictionary_service as dictionary_svc
+
+        await dictionary_svc.prefetch_challenge_definitions(
+            db,
+            [card.dictionary_entry for card in released_today if card.dictionary_entry is not None],
+        )
     released_today_ids = {card.id for card in released_today if card.id is not None}
 
     freeze = (
-        log is not None and _deck_locked(log) and not force_rebuild and entry_id_allowlist is None
+        log is not None
+        and _deck_locked(log)
+        and not force_rebuild
+        and (drip_allowlist is None or auto_book)
     )
     learning_retention_count = 0
     mastered_retention_count = 0
@@ -1004,7 +1038,7 @@ async def build_daily_mix(
             limit=learning_retention_goal,
             now=now,
             exclude_ids=set(),
-            entry_id_allowlist=entry_id_allowlist,
+            entry_id_allowlist=retention_allowlist,
             strength_in={"learning", "familiar"},
         )
         learning_picked_ids = {card.id for card in learning_retention_cards if card.id is not None}
@@ -1012,8 +1046,8 @@ async def build_daily_mix(
             db, learner=learner, parent_id=parent_id
         )
         mastered_allowlist = current_level_ids
-        if entry_id_allowlist is not None:
-            mastered_allowlist = entry_id_allowlist & current_level_ids
+        if retention_allowlist is not None:
+            mastered_allowlist = retention_allowlist & current_level_ids
         mastered_retention_cards = await pick_retention(
             db,
             learner=learner,
@@ -1038,7 +1072,7 @@ async def build_daily_mix(
         ]
         retention_ids = learning_retention_ids + mastered_retention_ids
         # Keep prior retention picks from an earlier lock when still valid (unfiltered only).
-        if entry_id_allowlist is None and not force_rebuild:
+        if retention_allowlist is None and not force_rebuild:
             for card_id in existing_ids:
                 if card_id in newest_new or card_id in retention_ids:
                     continue
@@ -1142,7 +1176,7 @@ async def build_daily_mix(
         cards = [cards_by_id[card_id] for card_id in card_ids if card_id in cards_by_id]
 
     await srs_service.enrich_cards_zh_hant(db, cards)
-    return {
+    mix = {
         "cards": [srs_service.card_to_dict(card) for card in cards],
         "new_count": new_count,
         "retention_count": retention_count,
@@ -1160,7 +1194,22 @@ async def build_daily_mix(
         "source_kind": log.source_kind or "random",
         "source_ref": log.source_ref,
         "can_regenerate": _can_regenerate(log),
+        "book_title": None,
+        "study_progress_percent": None,
+        "page_coverage_percent": None,
+        "ready_to_read": None,
     }
+    if auto_book or (log.source_kind == "book"):
+        from app.services import book_service
+
+        active = await book_service.get_active_book_for_learner(db, learner.id)
+        if active is not None:
+            progress = await book_service.progress_for_learner(db, active, learner.id)
+            mix["book_title"] = active.title
+            mix["study_progress_percent"] = progress["study_progress_percent"]
+            mix["page_coverage_percent"] = progress["page_coverage_percent"]
+            mix["ready_to_read"] = progress["ready_to_read"]
+    return mix
 
 
 def _card_ids_from_log(log: DailyChallengeLog) -> list[int]:

@@ -38,6 +38,13 @@ const QUICK_LINKS = [
     color: "from-green-50 to-teal-50",
   },
   {
+    to: "/parent/books",
+    emoji: "📗",
+    title: "Books",
+    hint: "Upload a book as a word bank",
+    color: "from-emerald-50 to-teal-50",
+  },
+  {
     to: "/parent/quests",
     emoji: "🗺️",
     title: "Quests",

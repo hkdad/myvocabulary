@@ -83,6 +83,10 @@ class DailyMixResponse(BaseModel):
     source_kind: str | None = "random"
     source_ref: str | None = None
     can_regenerate: bool = True
+    book_title: str | None = None
+    study_progress_percent: float | None = None
+    page_coverage_percent: float | None = None
+    ready_to_read: bool | None = None
 
 
 class ChallengeSourceCategory(BaseModel):

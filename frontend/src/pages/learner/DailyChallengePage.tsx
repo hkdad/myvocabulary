@@ -59,6 +59,7 @@ export default function DailyChallengePage() {
   const [error, setError] = useState<string | null>(null);
   const [alreadyCompleted, setAlreadyCompleted] = useState(false);
   const [canRegenerate, setCanRegenerate] = useState(false);
+  const [bookTitle, setBookTitle] = useState<string | null>(null);
   const [unresolvedMistakes, setUnresolvedMistakes] = useState(0);
   const [attemptCorrect, setAttemptCorrect] = useState(0);
   const [attemptTotal, setAttemptTotal] = useState(0);
@@ -143,6 +144,7 @@ export default function DailyChallengePage() {
   const applyMix = useCallback(async (mix: DailyMix, forcePractice = false) => {
     setAlreadyCompleted(mix.completed_today);
     setCanRegenerate(Boolean(mix.can_regenerate) && !mix.completed_today);
+    setBookTitle(mix.book_title ?? null);
     if (mix.completed_today && !forcePractice) {
       setPhase("done");
       return;
@@ -679,7 +681,9 @@ export default function DailyChallengePage() {
               <p className="mt-1 text-sm font-semibold text-warm-brown-soft">
                 {mistakesMode
                   ? `Up to ${MISTAKE_WORD_LIMIT} mistake words, then Listen & Pick`
-                  : "Step 2: match each word to its meaning (need 80% correct)"}
+                  : bookTitle
+                    ? `New words from ${bookTitle} · bank retention stays warm`
+                    : "Step 2: match each word to its meaning (need 80% correct)"}
               </p>
             </div>
             <div className="flex flex-wrap items-center gap-2">
