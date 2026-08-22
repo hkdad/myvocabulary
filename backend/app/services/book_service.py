@@ -23,7 +23,7 @@ from app.services.book_analysis import (
     extract_book_text,
     title_from_filename,
 )
-from app.services.dictionary_service import normalize_word
+from app.services.dictionary_service import is_placeholder_definition, normalize_word
 
 MAX_BOOK_BYTES = 10 * 1024 * 1024
 PLACEHOLDER_DEFINITION = loop_engine.PLACEHOLDER_DEFINITION
@@ -90,6 +90,19 @@ def _apply_coverage(lemmas: list[BookLemma], coverage_target: float) -> int:
     return study_count
 
 
+async def _family_bank_words(db: AsyncSession, parent_id: int) -> dict[str, int]:
+    """Lemma → dictionary_entry_id for words in the family bank."""
+    bank = await loop_engine.get_family_bank(db, parent_id)
+    if bank is None:
+        return {}
+    result = await db.execute(
+        select(DictionaryEntry.id, DictionaryEntry.word)
+        .join(WordListItem, WordListItem.dictionary_entry_id == DictionaryEntry.id)
+        .where(WordListItem.word_list_id == bank.id)
+    )
+    return {word: entry_id for entry_id, word in result.all()}
+
+
 async def preview_upload(db: AsyncSession, *, parent_id: int, upload: UploadFile) -> Book:
     filename = upload.filename or "book.txt"
     data = await upload.read()
@@ -127,14 +140,8 @@ async def preview_upload(db: AsyncSession, *, parent_id: int, upload: UploadFile
     await db.flush()
 
     lemmas_to_match = [item.lemma for item in analysis.lemmas]
-    existing: dict[str, int] = {}
-    if lemmas_to_match:
-        result = await db.execute(
-            select(DictionaryEntry.id, DictionaryEntry.word).where(
-                DictionaryEntry.word.in_(lemmas_to_match)
-            )
-        )
-        existing = {word: entry_id for entry_id, word in result.all()}
+    bank_words = await _family_bank_words(db, parent_id)
+    existing = {lemma: bank_words[lemma] for lemma in lemmas_to_match if lemma in bank_words}
 
     for item in analysis.lemmas:
         db.add(
@@ -174,11 +181,14 @@ async def confirm_book(
     db.add(word_list)
     await db.flush()
 
+    placeholder_entries: list[DictionaryEntry] = []
     for lemma in book.lemmas:
         if not lemma.in_study_set or lemma.is_hidden:
             continue
         entry = await _resolve_entry(db, lemma.lemma)
         lemma.dictionary_entry_id = entry.id
+        if is_placeholder_definition(entry):
+            placeholder_entries.append(entry)
         db.add(
             WordListItem(
                 word_list_id=word_list.id,
@@ -186,6 +196,9 @@ async def confirm_book(
                 sort_order=lemma.rank,
             )
         )
+
+    if placeholder_entries:
+        await dictionary_service.prefetch_study_set_definitions(db, placeholder_entries)
 
     book.word_list_id = word_list.id
     book.status = "confirmed"
@@ -208,6 +221,17 @@ async def _resolve_entry(db: AsyncSession, lemma: str) -> DictionaryEntry:
     db.add(entry)
     await db.flush()
     return entry
+
+
+async def delete_preview(db: AsyncSession, *, parent_id: int, book_id: int) -> None:
+    book = await _get_book_for_parent(db, book_id, parent_id)
+    if book.status != "preview":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Only preview books can be deleted",
+        )
+    await db.delete(book)
+    await db.commit()
 
 
 async def list_books(db: AsyncSession, parent_id: int) -> list[Book]:
@@ -330,6 +354,7 @@ async def get_active_book_for_learner(db: AsyncSession, learner_id: int) -> Book
             Book.status == "confirmed",
         )
         .options(selectinload(Book.lemmas))
+        .order_by(WordListAssignment.assigned_at.desc(), Book.id.desc())
         .limit(1)
     )
     return result.scalar_one_or_none()
@@ -358,7 +383,10 @@ async def assigned_learner_ids(db: AsyncSession, book: Book) -> list[int]:
     return list(result.scalars().all())
 
 
-async def _known_entry_ids(db: AsyncSession, learner_id: int, entry_ids: set[int]) -> set[int]:
+async def _baseline_known_entry_ids(
+    db: AsyncSession, learner_id: int, entry_ids: set[int]
+) -> set[int]:
+    """Family-bank words the learner already knows — counts as free book progress."""
     if not entry_ids:
         return set()
     cards_result = await db.execute(
@@ -376,6 +404,10 @@ async def _known_entry_ids(db: AsyncSession, learner_id: int, entry_ids: set[int
         if days_map.get(card.id, 0) >= 1:
             known.add(card.dictionary_entry_id)
     return known
+
+
+async def _known_entry_ids(db: AsyncSession, learner_id: int, entry_ids: set[int]) -> set[int]:
+    return await _baseline_known_entry_ids(db, learner_id, entry_ids)
 
 
 async def progress_for_learner(db: AsyncSession, book: Book, learner_id: int) -> dict:
@@ -452,14 +484,19 @@ def book_to_summary(book: Book, *, assigned_learner_ids: list[int] | None = None
 
 
 def book_to_preview(book: Book, *, assigned_learner_ids: list[int] | None = None) -> dict:
-    matched = [lemma for lemma in book.lemmas if lemma.dictionary_entry_id is not None]
+    matched = [
+        lemma
+        for lemma in book.lemmas
+        if lemma.dictionary_entry_id is not None and not lemma.is_hidden
+    ]
+    baseline_lemmas = {lemma.lemma for lemma in matched}
     study = [lemma for lemma in book.lemmas if lemma.in_study_set and not lemma.is_hidden]
     advanced = [lemma for lemma in book.lemmas if not lemma.in_study_set and not lemma.is_hidden]
     summary = book_to_summary(book, assigned_learner_ids=assigned_learner_ids)
     summary.update(
         {
-            "baseline_match_count": len(matched),
-            "new_word_count": max(0, book.content_lemma_count - len(matched)),
+            "baseline_match_count": len(baseline_lemmas),
+            "new_word_count": max(0, book.content_lemma_count - len(baseline_lemmas)),
             "sample_study": [
                 {
                     "id": lemma.id,

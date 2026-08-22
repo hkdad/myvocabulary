@@ -4,8 +4,10 @@ import { Link } from "react-router-dom";
 import {
   assignBook,
   confirmBook,
+  deleteBook,
   getBook,
   getBookProgress,
+  hideBookLemma,
   listBooks,
   previewBook,
   unassignBook,
@@ -29,6 +31,7 @@ export default function BooksPage() {
   const [confirming, setConfirming] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [assignId, setAssignId] = useState<number | "">("");
+  const [hidingLemmaId, setHidingLemmaId] = useState<number | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -132,6 +135,37 @@ export default function BooksPage() {
     }
   }
 
+  async function handleDeletePreview(bookId: number) {
+    setError(null);
+    try {
+      await deleteBook(bookId);
+      if (selected?.id === bookId) {
+        setSelected(null);
+        setProgress([]);
+      }
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not delete preview");
+    }
+  }
+
+  async function handleHideLemma(lemmaId: number, hidden: boolean) {
+    if (!selected) {
+      return;
+    }
+    setHidingLemmaId(lemmaId);
+    setError(null);
+    try {
+      const updated = await hideBookLemma(selected.id, lemmaId, hidden);
+      setSelected(updated);
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not update word");
+    } finally {
+      setHidingLemmaId(null);
+    }
+  }
+
   return (
     <PageShell variant="parent">
       <main className="mx-auto flex min-h-screen max-w-5xl flex-col gap-6 p-6 sm:p-8">
@@ -216,7 +250,7 @@ export default function BooksPage() {
               </p>
               {(selected.baseline_match_count ?? 0) > 0 && (
                 <p className="mt-2 text-sm text-warm-body">
-                  {selected.baseline_match_count} already in the family dictionary ·{" "}
+                  {selected.baseline_match_count} already in the family word bank ·{" "}
                   {selected.new_word_count} new
                 </p>
               )}
@@ -239,18 +273,40 @@ export default function BooksPage() {
                   >
                     Confirm 90% · read independently
                   </button>
+                  <button
+                    type="button"
+                    onClick={() => void handleDeletePreview(selected.id)}
+                    className="warm-btn text-sm text-red-600"
+                  >
+                    Discard preview
+                  </button>
                 </div>
               )}
 
               {selected.sample_study && selected.sample_study.length > 0 && (
                 <div className="mt-4">
                   <p className="text-sm font-bold text-warm-muted">Study set sample</p>
-                  <p className="mt-1 text-sm text-warm-brown-soft">
-                    {selected.sample_study
-                      .slice(0, 12)
-                      .map((row) => row.lemma)
-                      .join(", ")}
-                  </p>
+                  <ul className="mt-2 divide-y divide-orange-100">
+                    {selected.sample_study.slice(0, 20).map((row) => (
+                      <li key={row.id} className="flex items-center justify-between gap-3 py-2">
+                        <span className="text-sm text-warm-brown-soft">
+                          <span className="font-semibold text-warm-brown">{row.lemma}</span>
+                          {row.matched_baseline ? " · in bank" : ""}
+                          {row.is_hidden ? " · hidden" : ""}
+                        </span>
+                        {!row.is_hidden && (
+                          <button
+                            type="button"
+                            disabled={hidingLemmaId === row.id}
+                            onClick={() => void handleHideLemma(row.id, true)}
+                            className="text-xs font-semibold text-warm-muted hover:text-red-600"
+                          >
+                            {hidingLemmaId === row.id ? "…" : "Hide"}
+                          </button>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
                 </div>
               )}
 

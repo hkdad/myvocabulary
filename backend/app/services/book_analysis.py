@@ -475,14 +475,17 @@ def extract_txt(data: bytes) -> str:
     return data.decode("utf-8", errors="replace")
 
 
+def _safe_zip_member(name: str) -> bool:
+    """Reject zip-slip and absolute paths."""
+    if not name or name.startswith("/") or ".." in name.split("/"):
+        return False
+    return name.lower().endswith((".xhtml", ".html", ".htm"))
+
+
 def extract_epub(data: bytes) -> str:
     chunks: list[str] = []
     with zipfile.ZipFile(io.BytesIO(data)) as archive:
-        names = [
-            name
-            for name in archive.namelist()
-            if name.lower().endswith((".xhtml", ".html", ".htm"))
-        ]
+        names = [name for name in archive.namelist() if _safe_zip_member(name)]
         names.sort()
         for name in names:
             raw = archive.read(name)

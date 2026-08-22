@@ -86,6 +86,10 @@ export async function unassignBook(bookId: number, learnerId: number): Promise<B
   return apiFetch<BookSummary>(`/books/${bookId}/assign/${learnerId}`, { method: "DELETE" }, API_BASE_URL);
 }
 
+export async function deleteBook(bookId: number): Promise<void> {
+  await apiFetch<void>(`/books/${bookId}`, { method: "DELETE" }, API_BASE_URL);
+}
+
 export async function hideBookLemma(
   bookId: number,
   lemmaId: number,

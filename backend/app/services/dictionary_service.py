@@ -1,3 +1,4 @@
+import asyncio
 import json
 import re
 from datetime import UTC, datetime, timedelta
@@ -11,6 +12,9 @@ from app.config import get_settings
 from app.models.dictionary import DictionaryEntry
 
 CACHE_DAYS = 30
+PREFETCH_DEADLINE_SECONDS = 3.0
+PREFETCH_PER_WORD_TIMEOUT = 2.0
+CONFIRM_PREFETCH_DEADLINE_SECONDS = 45.0
 _PREFERRED_POS = ("noun", "verb", "adjective", "adverb")
 
 
@@ -299,11 +303,11 @@ def _parse_kid_definition_json(text: str, word: str) -> dict | None:
 
 
 async def generate_kid_definition(word: str) -> dict | None:
-    """Kid-friendly gloss via local Ollama, then OpenAI-compatible chat. None on failure."""
+    """Kid-friendly gloss via local Ollama only. None on failure — caller falls back to fetch_from_api."""
     settings = get_settings()
     api_base = settings.openai_api_base.rstrip("/")
     is_ollama = ":11434" in api_base or api_base.startswith("http://127.0.0.1:11434")
-    if not is_ollama and not settings.openai_api_key:
+    if not is_ollama:
         return None
 
     prompt = (
@@ -315,46 +319,18 @@ async def generate_kid_definition(word: str) -> dict | None:
     ollama_root = api_base[: -len("/v1")] if api_base.endswith("/v1") else api_base
     try:
         async with httpx.AsyncClient(timeout=8.0) as client:
-            if is_ollama:
-                gen = await client.post(
-                    f"{ollama_root}/api/generate",
-                    json={
-                        "model": settings.openai_model,
-                        "prompt": prompt,
-                        "stream": False,
-                        "options": {"temperature": 0.2, "num_predict": 120},
-                    },
-                )
-                if gen.status_code == 200:
-                    parsed = _parse_kid_definition_json(str(gen.json().get("response") or ""), word)
-                    if parsed:
-                        return parsed
-            if settings.openai_api_key:
-                response = await client.post(
-                    f"{api_base}/chat/completions",
-                    headers={"Authorization": f"Bearer {settings.openai_api_key}"},
-                    json={
-                        "model": settings.openai_model,
-                        "messages": [
-                            {
-                                "role": "system",
-                                "content": (
-                                    "You write kid-friendly English dictionary entries as JSON."
-                                ),
-                            },
-                            {"role": "user", "content": prompt},
-                        ],
-                        "temperature": 0.2,
-                        "max_tokens": 256,
-                    },
-                    timeout=8.0,
-                )
-                response.raise_for_status()
-                message = response.json()["choices"][0]["message"]
-                content = str(message.get("content") or "")
-                parsed = _parse_kid_definition_json(content, word)
+            gen = await client.post(
+                f"{ollama_root}/api/generate",
+                json={
+                    "model": settings.openai_model,
+                    "prompt": prompt,
+                    "stream": False,
+                    "options": {"temperature": 0.2, "num_predict": 120},
+                },
+            )
+            if gen.status_code == 200:
+                parsed = _parse_kid_definition_json(str(gen.json().get("response") or ""), word)
                 if parsed:
-                    parsed["source"] = "openai"
                     return parsed
     except Exception:
         return None
@@ -387,10 +363,51 @@ async def fill_placeholder_definition(db: AsyncSession, entry: DictionaryEntry) 
     return entry
 
 
-async def prefetch_challenge_definitions(db: AsyncSession, entries: list[DictionaryEntry]) -> None:
+async def _prefetch_with_deadline(
+    db: AsyncSession,
+    entries: list[DictionaryEntry],
+    *,
+    deadline_seconds: float,
+    per_word_timeout: float,
+) -> None:
+    """Fill placeholder glosses within a time budget. Same session — sequential, never raises."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + deadline_seconds
     for entry in entries:
-        if is_placeholder_definition(entry):
-            await fill_placeholder_definition(db, entry)
+        if not is_placeholder_definition(entry):
+            continue
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            break
+        try:
+            await asyncio.wait_for(
+                fill_placeholder_definition(db, entry),
+                timeout=min(per_word_timeout, remaining),
+            )
+        except (TimeoutError, Exception):
+            continue
+
+
+async def prefetch_challenge_definitions(db: AsyncSession, entries: list[DictionaryEntry]) -> None:
+    """Best-effort gloss fill before returning today's mix — bounded so kids are not left waiting."""
+    placeholders = [entry for entry in entries if is_placeholder_definition(entry)]
+    await _prefetch_with_deadline(
+        db,
+        placeholders,
+        deadline_seconds=PREFETCH_DEADLINE_SECONDS,
+        per_word_timeout=PREFETCH_PER_WORD_TIMEOUT,
+    )
+
+
+async def prefetch_study_set_definitions(db: AsyncSession, entries: list[DictionaryEntry]) -> None:
+    """Parent confirm path — longer budget since this runs once per book."""
+    placeholders = [entry for entry in entries if is_placeholder_definition(entry)]
+    await _prefetch_with_deadline(
+        db,
+        placeholders,
+        deadline_seconds=CONFIRM_PREFETCH_DEADLINE_SECONDS,
+        per_word_timeout=8.0,
+    )
 
 
 _CJK_RE = re.compile(r"[\u3400-\u9FFF]+")

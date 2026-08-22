@@ -27,3 +27,9 @@ Content lemmas ranked by frequency. Take the shortest prefix that covers
 
 PDF parsing, auto book progression, lemma surface-variant table, frequency-sorted
 drip beyond rank-at-confirm, book covers / ebook metadata.
+
+## Deploy note
+
+Book parsing prefers spaCy (`en_core_web_sm`) when installed. Docker images use the
+offline fallback tokenizer unless you add spaCy to the image. Coverage numbers may
+differ slightly between dev (spaCy) and prod (fallback).

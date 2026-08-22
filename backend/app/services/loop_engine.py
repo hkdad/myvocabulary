@@ -962,6 +962,12 @@ async def build_daily_mix(
                 if retention_entry_id_allowlist is _UNSET:
                     retention_entry_id_allowlist = None
 
+    if not auto_book and source_kind is None:
+        from app.services import book_service as book_svc
+
+        if await book_svc.get_active_book_for_learner(db, learner.id) is None:
+            source_kind = "random"
+
     drip_allowlist = entry_id_allowlist
     if retention_entry_id_allowlist is _UNSET:
         retention_allowlist: set[int] | None = entry_id_allowlist

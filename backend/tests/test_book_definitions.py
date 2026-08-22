@@ -67,3 +67,42 @@ async def test_fill_placeholder_falls_back_to_api(db_session) -> None:
         filled = await fill_placeholder_definition(db_session, entry)
     assert filled.definition == "A small mountain."
     assert filled.source == "freedictionary"
+
+
+@pytest.mark.asyncio
+async def test_prefetch_challenge_definitions_respects_deadline(db_session) -> None:
+    from app.services.dictionary_service import prefetch_challenge_definitions
+
+    entries = [
+        DictionaryEntry(
+            word=f"word{i}",
+            definition="Definition pending — added from family word bank.",
+            source="placeholder",
+        )
+        for i in range(5)
+    ]
+    for entry in entries:
+        db_session.add(entry)
+    await db_session.flush()
+
+    async def slow_fill(_db, entry):
+        import asyncio
+
+        await asyncio.sleep(2.0)
+        entry.definition = f"Defined {entry.word}"
+        entry.source = "test"
+        await _db.flush()
+
+    with patch(
+        "app.services.dictionary_service.fill_placeholder_definition",
+        side_effect=slow_fill,
+    ):
+        import asyncio
+
+        start = asyncio.get_event_loop().time()
+        await prefetch_challenge_definitions(db_session, entries)
+        elapsed = asyncio.get_event_loop().time() - start
+
+    assert elapsed < 5.0
+    filled = sum(1 for entry in entries if entry.definition.startswith("Defined"))
+    assert filled <= 2

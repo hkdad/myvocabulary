@@ -54,3 +54,16 @@ def test_pdf_rejected() -> None:
         assert "PDF" in str(exc)
     else:
         raise AssertionError("expected ValueError")
+
+
+def test_epub_rejects_zip_slip_paths() -> None:
+    import io
+    import zipfile
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("../evil.xhtml", b"<p>bad</p>")
+        archive.writestr("chapter.xhtml", b"<p>Hello hill.</p>")
+    text = extract_book_text(filename="story.epub", data=buffer.getvalue())
+    assert "Hello" in text
+    assert "bad" not in text

@@ -44,6 +44,15 @@ async def list_books(
     return BookListResponse(books=summaries)
 
 
+@router.delete("/{book_id}", status_code=204)
+async def delete_book(
+    book_id: int,
+    parent: User = Depends(require_parent),
+    db: AsyncSession = Depends(get_db),
+) -> None:
+    await book_service.delete_preview(db, parent_id=parent.id, book_id=book_id)
+
+
 @router.get("/{book_id}", response_model=BookSummary)
 async def get_book(
     book_id: int,
