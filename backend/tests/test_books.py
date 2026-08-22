@@ -467,7 +467,9 @@ async def test_progress_credits_baseline_srs(client: AsyncClient, db_session) ->
 
 
 @pytest.mark.asyncio
-async def test_learner_words_overlap_shows_bank_level_and_book(client: AsyncClient, db_session) -> None:
+async def test_learner_words_overlap_shows_bank_level_and_book(
+    client: AsyncClient, db_session
+) -> None:
     parent_token = await _login(client, "parent", "parent123")
     csv_content = "word,definition,level,category\nfox,A wild animal,A1,Animals\n"
     await client.post(
@@ -534,7 +536,7 @@ async def test_learner_words_overlap_shows_bank_level_and_book(client: AsyncClie
     assert book_title not in payload["by_level"]
 
     by_a1 = await client.get(
-        f"/api/v1/loop/words?level=A1",
+        "/api/v1/loop/words?level=A1",
         headers={"Authorization": f"Bearer {leo_token}"},
     )
     assert any(item["word"] == "fox" for item in by_a1.json()["items"])

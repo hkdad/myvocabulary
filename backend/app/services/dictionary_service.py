@@ -303,7 +303,10 @@ def _parse_kid_definition_json(text: str, word: str) -> dict | None:
 
 
 async def generate_kid_definition(word: str) -> dict | None:
-    """Kid-friendly gloss via local Ollama only. None on failure — caller falls back to fetch_from_api."""
+    """Kid-friendly gloss via local Ollama only.
+
+    Returns None on failure — caller falls back to fetch_from_api.
+    """
     settings = get_settings()
     api_base = settings.openai_api_base.rstrip("/")
     is_ollama = ":11434" in api_base or api_base.startswith("http://127.0.0.1:11434")
@@ -420,7 +423,10 @@ async def _commit_cached_definitions(db: AsyncSession, filled_count: int) -> Non
 
 
 async def prefetch_challenge_definitions(db: AsyncSession, entries: list[DictionaryEntry]) -> None:
-    """Best-effort gloss fill before returning today's mix — bounded so kids are not left waiting."""
+    """Best-effort gloss fill before returning today's mix.
+
+    Bounded so kids are not left waiting on slow dictionary APIs.
+    """
     placeholders = [entry for entry in entries if is_placeholder_definition(entry)]
     if not placeholders:
         return
@@ -760,7 +766,7 @@ async def lookup_word(db: AsyncSession, word: str) -> DictionaryEntry:
 
     existing = await get_entry_by_word(db, normalized)
     if existing and _is_cache_fresh(existing) and not is_placeholder_definition(existing):
-        return await ensure_zh_hant(db, existing)
+        return existing
 
     data = await fetch_from_api(normalized)
     if existing:
@@ -776,13 +782,13 @@ async def lookup_word(db: AsyncSession, word: str) -> DictionaryEntry:
         existing.fetched_at = data["fetched_at"]
         await db.commit()
         await db.refresh(existing)
-        return await ensure_zh_hant(db, existing)
+        return existing
 
     entry = DictionaryEntry(**data)
     db.add(entry)
     await db.commit()
     await db.refresh(entry)
-    return await ensure_zh_hant(db, entry)
+    return entry
 
 
 async def create_manual_entry(

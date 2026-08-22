@@ -293,6 +293,44 @@ async def test_clear_zh_hant_parent_can_clear(client, db_session) -> None:
 
 
 @pytest.mark.asyncio
+async def test_lookup_does_not_refill_cleared_zh(client, db_session) -> None:
+    from datetime import UTC, datetime
+
+    from app.models.dictionary import DictionaryEntry
+
+    token = await _login(client, "leo", "leo")
+    entry = DictionaryEntry(
+        word="e2eline",
+        definition="A long thin mark on a surface.",
+        source="e2e",
+        fetched_at=datetime.now(UTC),
+        definition_zh_hant="錯誤翻譯",
+    )
+    db_session.add(entry)
+    await db_session.commit()
+    await db_session.refresh(entry)
+
+    cleared = await client.delete(
+        f"/api/v1/dictionary/entries/{entry.id}/zh-hant",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert cleared.status_code == 200
+
+    with patch(
+        "app.services.dictionary_service.translate_definition_to_zh_hant",
+        new_callable=AsyncMock,
+        return_value="表面上有一個細長的痕跡。",
+    ):
+        lookup = await client.get(
+            "/api/v1/dictionary/words/e2eline",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert lookup.status_code == 200
+    assert lookup.json()["definition_zh_hant"] is None
+
+
+@pytest.mark.asyncio
 async def test_clear_zh_hant_404(client) -> None:
     token = await _login(client, "leo", "leo")
     response = await client.delete(

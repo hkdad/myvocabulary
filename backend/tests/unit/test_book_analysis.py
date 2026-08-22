@@ -3,7 +3,6 @@ from app.services.book_analysis import (
     coverage_curve,
     extract_book_text,
     extract_book_title,
-    extract_epub_title,
     fallback_lemmatize,
     infer_title_from_text,
     title_from_filename,

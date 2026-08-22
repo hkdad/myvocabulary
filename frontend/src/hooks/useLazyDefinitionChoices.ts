@@ -119,10 +119,13 @@ export function useLazyDefinitionChoices(
         }
       }
 
+      if (!cancelled) {
+        setDefinitionsReady(true);
+      }
+
       const zhItems = await ensureZhHant(sessionIds);
       if (!cancelled) {
         applyZhUpdates(setCards, setZhByEntryId, zhItems);
-        setDefinitionsReady(true);
       }
     }
 
