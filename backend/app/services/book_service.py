@@ -240,9 +240,7 @@ async def _resolve_entry(db: AsyncSession, lemma: str) -> DictionaryEntry:
     return entry
 
 
-async def update_book_title(
-    db: AsyncSession, *, parent_id: int, book_id: int, title: str
-) -> Book:
+async def update_book_title(db: AsyncSession, *, parent_id: int, book_id: int, title: str) -> Book:
     cleaned = title.strip()
     if not cleaned:
         raise HTTPException(
