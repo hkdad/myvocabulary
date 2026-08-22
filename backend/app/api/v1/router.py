@@ -1,6 +1,5 @@
 from fastapi import APIRouter
 
-from app.version import get_version
 from app.api.v1 import (
     auth,
     books,
@@ -15,6 +14,7 @@ from app.api.v1 import (
     word_bank,
     word_lists,
 )
+from app.version import get_version
 
 router = APIRouter()
 
