@@ -91,6 +91,7 @@ class DailyMixResponse(BaseModel):
     book_learning_count: int | None = None
     book_familiar_count: int | None = None
     book_mastered_count: int | None = None
+    book_new_drip_empty: bool | None = None
 
 
 class ChallengeSourceCategory(BaseModel):

@@ -15,13 +15,26 @@ keeping baseline retention warm. Parent sees **Book progress** and **Page covera
 2. Preview shows tokens, content lemmas, 80%/90% caps, baseline matches, time estimate.
 3. Parent confirms (default 80% cap, optional 90%) → `WordList(source=book)` + items.
 4. Parent activates the book for one child (one active book per learner).
-5. Daily Challenge: **new = book study set**, **retention = family bank SRS**.
+5. Daily Challenge: **new = book study set (level-filtered)**, **retention = family bank SRS**.
 6. Closing the assignment restores bank drip.
 
 ## Study set
 
 Content lemmas ranked by frequency. Take the shortest prefix that covers
 `coverage_target` of content-token mass. Hidden lemmas are excluded.
+
+## New-word level filter
+
+Book study lemmas do not carry their own CEFR tags. When a lemma also exists in the
+family bank, that bank `level` is used to filter **new drip only**:
+
+- Keep bank-tagged lemmas at **or above** the learner's current CEFR.
+- Drop bank-tagged lemmas **below** the learner's current CEFR.
+- Keep **unbanked** study lemmas (no family-bank row) — they are book-specific vocabulary.
+
+If every bank-tagged study lemma is below level and there are no unbanked lemmas left,
+the mix is **retention-only** for that day (`book_new_drip_empty=true`). Retention is
+unchanged (any released SRS, including lower bands).
 
 ## Out of v1
 
