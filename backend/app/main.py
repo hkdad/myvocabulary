@@ -7,6 +7,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app.api.v1.router import router as api_v1_router
 from app.config import get_settings
+from app.version import get_version
 
 settings = get_settings()
 
@@ -14,7 +15,7 @@ settings = get_settings()
 def create_app() -> FastAPI:
     app = FastAPI(
         title="myvocabulary API",
-        version="0.1.0",
+        version=get_version(),
         docs_url="/docs" if settings.debug else None,
         redoc_url="/redoc" if settings.debug else None,
     )

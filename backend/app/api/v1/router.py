@@ -14,6 +14,7 @@ from app.api.v1 import (
     word_bank,
     word_lists,
 )
+from app.version import get_version
 
 router = APIRouter()
 
@@ -33,4 +34,4 @@ router.include_router(challenges.router)
 
 @router.get("/status")
 async def api_status() -> dict[str, str]:
-    return {"status": "ok", "version": "0.1.0"}
+    return {"status": "ok", "version": get_version()}

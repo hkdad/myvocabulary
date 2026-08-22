@@ -60,9 +60,21 @@ myvocabulary/
 - [Phase 2 Technical Spec](docs/phase-2-spec.md) (current product truth — loop + readiness)
 - [Project Plan](docs/project-plan.md)
 - [Project Status](docs/project-status.md)
+- [Changelog](CHANGELOG.md)
 - [Architecture](docs/architecture.md)
 - [Backup / restore](docs/backup-restore.md)
 - [Deploy (docker.home)](docs/deploy-docker-home.md)
+
+## Versioning
+
+Release version lives in [`VERSION`](VERSION) (currently **0.2.0**). On each release:
+
+1. Bump `VERSION` and [`CHANGELOG.md`](CHANGELOG.md)
+2. Sync `frontend/package.json` to the same semver
+3. Tag: `git tag -a v0.2.0 -m "0.2.0"` and `git push origin v0.2.0`
+4. Deploy from `main` and run `alembic upgrade head` (schema is separate from app semver)
+
+API reports the version at `GET /api/v1/status`.
 
 ## Sprint status
 

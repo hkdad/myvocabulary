@@ -72,7 +72,8 @@ async def test_lookup_elephant_returns_definition(client) -> None:
 
 
 @pytest.mark.asyncio
-async def test_lookup_includes_zh_hant_when_translation_available(client) -> None:
+async def test_lookup_does_not_auto_fill_zh_hant(client) -> None:
+    """Dictionary GET returns cached gloss only; zh is filled via ensure-zh."""
     token = await _login(client, "mia", "mia")
 
     with (
@@ -87,13 +88,22 @@ async def test_lookup_includes_zh_hant_when_translation_available(client) -> Non
             return_value="一種有象鼻的大型哺乳動物。",
         ),
     ):
-        response = await client.get(
+        lookup = await client.get(
             "/api/v1/dictionary/words/elephant",
             headers={"Authorization": f"Bearer {token}"},
         )
+        ensure = await client.post(
+            "/api/v1/dictionary/ensure-zh",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"entry_ids": [lookup.json()["id"]]},
+        )
 
-    assert response.status_code == 200
-    assert response.json()["definition_zh_hant"] == "一種有象鼻的大型哺乳動物。"
+    assert lookup.status_code == 200
+    assert lookup.json()["definition_zh_hant"] is None
+    assert ensure.status_code == 200
+    items = ensure.json()["items"]
+    assert len(items) == 1
+    assert items[0]["definition_zh_hant"] == "一種有象鼻的大型哺乳動物。"
 
 
 def test_extract_zh_hant_from_json_and_reasoning() -> None:

@@ -1,8 +1,9 @@
 # Project Status
 
 **Last updated:** 2026-08-22  
+**Release:** `0.2.0` (see [`VERSION`](../VERSION), [`CHANGELOG`](../CHANGELOG.md))  
 **Status:** Phase 2 P2.0 Loop MVP shipped on `main` · recognition-first + readiness-gated Level-up · P2.1 polish in progress · Book as Word Bank v1  
-**Latest merges:** #4 docker.home deploy · #3 parent quests  
+**Latest merges:** #6 ruff format · #5 book word bank · #4 docker.home deploy  
 
 **Test accounts:** `parent`/`parent123`, `mia`/`mia`, `leo`/`leo`, `max`/`max`
 
