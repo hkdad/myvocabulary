@@ -1,3 +1,4 @@
+from app.models.book import Book, BookLemma
 from app.models.challenge import LearnerBadge, LevelAssessment, LevelChallenge
 from app.models.daily_challenge import DailyChallengeLog
 from app.models.dictation import DictationAttempt, DictationSession
@@ -31,4 +32,6 @@ __all__ = [
     "LevelAssessment",
     "LearnerBadge",
     "DailyChallengeLog",
+    "Book",
+    "BookLemma",
 ]

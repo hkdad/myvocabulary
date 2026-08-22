@@ -37,6 +37,14 @@ export type DailyMix = {
   source_kind?: string | null;
   source_ref?: string | null;
   can_regenerate?: boolean;
+  book_title?: string | null;
+  study_progress_percent?: number | null;
+  page_coverage_percent?: number | null;
+  ready_to_read?: boolean | null;
+  book_study_total?: number | null;
+  book_learning_count?: number | null;
+  book_familiar_count?: number | null;
+  book_mastered_count?: number | null;
 };
 
 export type ChallengeSourceOptions = {
@@ -153,7 +161,7 @@ export const BANK_CATEGORIES = [
 
 const CEFR_LEVEL_ORDER = ["A1", "A2", "B1", "B2"] as const;
 
-/** Levels present in the bank summary, sorted A1 → B2 then any other keys. */
+/** Levels and book names present in the summary, sorted A1 → B2 then other keys. */
 export function bankLevelsFromSummary(byLevel: Record<string, number>): string[] {
   return Object.entries(byLevel)
     .filter(([, count]) => count > 0)
@@ -295,6 +303,7 @@ export type LearnerWordItem = {
   word: string;
   definition: string;
   level: string | null;
+  levels: string[];
   categories: string[];
   strength: LearnerWordStrength | "new";
   distinct_review_days: number;
@@ -311,6 +320,8 @@ export type LearnerWordsPage = {
   page_size: number;
   total_pages: number;
   by_level: Record<string, number>;
+  by_bank_level: Record<string, number>;
+  by_book: Record<string, number>;
   by_category: Record<string, number>;
   by_strength: Record<string, number>;
 };

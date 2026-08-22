@@ -11,6 +11,7 @@ import {
 import LearnerAvatar from "../../components/LearnerAvatar";
 import LearnerTopNav from "../../components/LearnerTopNav";
 import PageShell from "../../components/PageShell";
+import { isPlaceholderDefinition } from "../../lib/placeholderDefinition";
 import { useAuthStore } from "../../stores/authStore";
 
 const STRENGTH_OPTIONS: { value: LearnerWordStrength | ""; label: string }[] = [
@@ -85,7 +86,8 @@ export default function LearnerWordsPage() {
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
   const [totalPages, setTotalPages] = useState(0);
-  const [byLevel, setByLevel] = useState<Record<string, number>>({});
+  const [byBankLevel, setByBankLevel] = useState<Record<string, number>>({});
+  const [byBook, setByBook] = useState<Record<string, number>>({});
   const [byCategory, setByCategory] = useState<Record<string, number>>({});
   const [byStrength, setByStrength] = useState<Record<string, number>>({});
   const [level, setLevel] = useState(initialLevel);
@@ -97,7 +99,9 @@ export default function LearnerWordsPage() {
   const [error, setError] = useState<string | null>(null);
 
   const pageSize = 50;
-  const levelOptions = bankLevelsFromSummary(byLevel);
+  const bankLevelOptions = bankLevelsFromSummary(byBankLevel);
+  const bookOptions = bankLevelsFromSummary(byBook);
+  const levelOptions = [...bankLevelOptions, ...bookOptions];
   const categoryOptions = bankCategoriesFromSummary(byCategory);
   const releasedTotal =
     (byStrength.learning ?? 0) + (byStrength.familiar ?? 0) + (byStrength.mastered ?? 0);
@@ -117,7 +121,8 @@ export default function LearnerWordsPage() {
       setItems(data.items);
       setTotal(data.total);
       setTotalPages(data.total_pages);
-      setByLevel(data.by_level);
+      setByBankLevel(data.by_bank_level);
+      setByBook(data.by_book);
       setByCategory(data.by_category);
       setByStrength(data.by_strength);
     } catch (err) {
@@ -223,9 +228,9 @@ export default function LearnerWordsPage() {
                 );
               })}
             </div>
-            {levelOptions.length > 0 && (
+            {bankLevelOptions.length > 0 && (
               <div className="mt-3 flex flex-wrap gap-2 text-sm text-warm-body">
-                {levelOptions.map((lvl) => (
+                {bankLevelOptions.map((lvl) => (
                   <button
                     key={lvl}
                     type="button"
@@ -239,7 +244,28 @@ export default function LearnerWordsPage() {
                       setLevel(level === lvl ? "" : lvl);
                     }}
                   >
-                    {lvl}: {byLevel[lvl] ?? 0}
+                    {lvl}: {byBankLevel[lvl] ?? 0}
+                  </button>
+                ))}
+              </div>
+            )}
+            {bookOptions.length > 0 && (
+              <div className="mt-3 flex flex-wrap gap-2 text-sm text-warm-body">
+                {bookOptions.map((title) => (
+                  <button
+                    key={title}
+                    type="button"
+                    className={`rounded-full px-3 py-1 font-semibold ${
+                      level === title
+                        ? "bg-warm-coral text-white"
+                        : "bg-white/80 text-warm-brown hover:bg-orange-50"
+                    }`}
+                    onClick={() => {
+                      setPage(1);
+                      setLevel(level === title ? "" : title);
+                    }}
+                  >
+                    {title}: {byBook[title] ?? 0}
                   </button>
                 ))}
               </div>
@@ -257,11 +283,11 @@ export default function LearnerWordsPage() {
             />
             <select
               className="warm-input max-w-[10rem]"
-              aria-label="Filter by level"
+              aria-label="Filter by level or book"
               value={level}
               onChange={(event) => updateFilterParams({ level: event.target.value })}
             >
-              <option value="">All levels</option>
+              <option value="">All levels & books</option>
               {levelOptions.map((lvl) => (
                 <option key={lvl} value={lvl}>
                   {lvl}
@@ -327,7 +353,7 @@ export default function LearnerWordsPage() {
                   <tr>
                     <th className="px-4 py-3 font-bold">Word</th>
                     <th className="px-4 py-3 font-bold">Definition</th>
-                    <th className="px-4 py-3 font-bold">Level</th>
+                    <th className="px-4 py-3 font-bold">Level / book</th>
                     <th className="px-4 py-3 font-bold">Category</th>
                     <th className="px-4 py-3 font-bold">Progress</th>
                   </tr>
@@ -337,7 +363,9 @@ export default function LearnerWordsPage() {
                     <tr key={item.card_id} className="text-warm-body">
                       <td className="px-4 py-3 font-semibold text-warm-brown">{item.word}</td>
                       <td className="max-w-md px-4 py-3 text-warm-brown-soft">
-                        {item.definition}
+                        {isPlaceholderDefinition(item.definition)
+                          ? "Looking up definition…"
+                          : item.definition}
                       </td>
                       <td className="px-4 py-3">{item.level ?? "—"}</td>
                       <td className="px-4 py-3">

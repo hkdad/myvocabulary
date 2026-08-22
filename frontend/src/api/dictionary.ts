@@ -53,6 +53,29 @@ export type EnsureZhItem = {
   definition_zh_hant: string;
 };
 
+export type EnsureDefinitionItem = {
+  id: number;
+  definition: string;
+  part_of_speech: string | null;
+  definition_zh_hant: string | null;
+};
+
+export async function ensureDefinitions(entryIds: number[]): Promise<EnsureDefinitionItem[]> {
+  const uniqueIds = [...new Set(entryIds.filter((id) => id > 0))];
+  if (uniqueIds.length === 0) {
+    return [];
+  }
+  const response = await apiFetch<{ items: EnsureDefinitionItem[] }>(
+    "/dictionary/ensure-definitions",
+    {
+      method: "POST",
+      body: JSON.stringify({ entry_ids: uniqueIds.slice(0, 20) }),
+    },
+    API_BASE_URL,
+  );
+  return response.items;
+}
+
 export async function ensureZhHant(entryIds: number[]): Promise<EnsureZhItem[]> {
   const uniqueIds = [...new Set(entryIds.filter((id) => id > 0))];
   if (uniqueIds.length === 0) {

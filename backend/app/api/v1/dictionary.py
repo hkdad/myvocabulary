@@ -13,6 +13,9 @@ from app.schemas.dictionary import (
     DictionaryEntryResponse,
     DictionarySearchResponse,
     DictionarySuggestResponse,
+    EnsureDefinitionsItem,
+    EnsureDefinitionsRequest,
+    EnsureDefinitionsResponse,
     EnsureZhRequest,
     EnsureZhResponse,
     ManualWordCreateRequest,
@@ -81,6 +84,27 @@ async def ensure_zh_hant(
             {"id": int(item["id"]), "definition_zh_hant": str(item["definition_zh_hant"])}
             for item in items
             if item.get("definition_zh_hant")
+        ]
+    )
+
+
+@router.post("/ensure-definitions", response_model=EnsureDefinitionsResponse)
+async def ensure_definitions(
+    payload: EnsureDefinitionsRequest,
+    _user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> EnsureDefinitionsResponse:
+    """Fill placeholder English glosses before MCQ — book/bank words start as placeholders."""
+    items = await dictionary_service.ensure_definitions_for_entry_ids(db, payload.entry_ids)
+    return EnsureDefinitionsResponse(
+        items=[
+            EnsureDefinitionsItem(
+                id=int(item["id"]),
+                definition=str(item["definition"]),
+                part_of_speech=item.get("part_of_speech"),  # type: ignore[arg-type]
+                definition_zh_hant=item.get("definition_zh_hant"),  # type: ignore[arg-type]
+            )
+            for item in items
         ]
     )
 

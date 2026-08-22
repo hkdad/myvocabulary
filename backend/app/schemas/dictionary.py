@@ -46,6 +46,21 @@ class EnsureZhResponse(BaseModel):
     items: list[EnsureZhItem] = Field(default_factory=list)
 
 
+class EnsureDefinitionsRequest(BaseModel):
+    entry_ids: list[int] = Field(default_factory=list, max_length=20)
+
+
+class EnsureDefinitionsItem(BaseModel):
+    id: int
+    definition: str
+    part_of_speech: str | None = None
+    definition_zh_hant: str | None = None
+
+
+class EnsureDefinitionsResponse(BaseModel):
+    items: list[EnsureDefinitionsItem] = Field(default_factory=list)
+
+
 class ClearZhResponse(BaseModel):
     id: int
     definition_zh_hant: str | None = None

@@ -66,8 +66,8 @@ export default function StatsPage() {
                 </div>
               </div>
               <p className="mt-3 text-sm text-warm-brown-soft">
-                Strength grows each day you recognize a word&apos;s meaning: Familiar after 2
-                practice days, Mastered after 3+. Spelling is bonus practice.
+                All released words — strength grows each day you recognize a meaning: Familiar
+                after 2 practice days, Mastered after 3+. Spelling is bonus practice.
               </p>
               <Link to="/app/words" className="warm-btn warm-btn-secondary mt-4 inline-block text-sm">
                 Browse my words

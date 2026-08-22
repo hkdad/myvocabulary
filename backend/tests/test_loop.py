@@ -277,6 +277,28 @@ async def test_daily_mix_caps_new_words(client: AsyncClient, db_session) -> None
     assert mix["new_count"] + mix["retention_count"] == 7
     assert len(mix["cards"]) == 7
 
+
+@pytest.mark.asyncio
+async def test_double_loop_today_does_not_500(client: AsyncClient, db_session) -> None:
+    """Home page may call GET /loop/today twice — must stay stable."""
+    parent_token = await _login(client, "parent", "parent123")
+    rows = "\n".join(f"word{i},Definition for word{i},A1,General" for i in range(8))
+    csv_content = f"word,definition,level,category\n{rows}\n"
+    import_response = await client.post(
+        "/api/v1/word-bank/import",
+        headers={"Authorization": f"Bearer {parent_token}"},
+        files={"file": ("bank.csv", io.BytesIO(csv_content.encode()), "text/csv")},
+    )
+    assert import_response.status_code == 200
+
+    leo_token = await _login(client, "leo", "leo")
+    headers = {"Authorization": f"Bearer {leo_token}"}
+
+    for _ in range(2):
+        response = await client.get("/api/v1/loop/today", headers=headers)
+        assert response.status_code == 200
+        assert len(response.json()["cards"]) == 7
+
     progress = await client.get(
         "/api/v1/loop/progress",
         headers={"Authorization": f"Bearer {leo_token}"},

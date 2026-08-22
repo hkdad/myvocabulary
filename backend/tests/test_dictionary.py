@@ -173,6 +173,40 @@ async def test_translate_includes_word_context_in_chat_request() -> None:
 
 
 @pytest.mark.asyncio
+async def test_translate_falls_back_to_mymemory_without_api_key() -> None:
+    from app.services.dictionary_service import translate_definition_to_zh_hant
+
+    async def fake_get(url: str, **kwargs):
+        response = MagicMock()
+        response.status_code = 200
+        response.json.return_value = {
+            "responseData": {"translatedText": "有輪子的圓形物體，使車輛能夠移動。"}
+        }
+        return response
+
+    mock_client = MagicMock()
+    mock_client.get = AsyncMock(side_effect=fake_get)
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+
+    with (
+        patch("app.services.dictionary_service.get_settings") as mock_settings,
+        patch("app.services.dictionary_service.httpx.AsyncClient", return_value=mock_client),
+    ):
+        mock_settings.return_value.openai_api_key = None
+        mock_settings.return_value.openai_api_base = "https://api.example.com/v1"
+        mock_settings.return_value.openai_model = "test-model"
+
+        zh = await translate_definition_to_zh_hant(
+            "a circular object that turns and allows vehicles to move",
+            word="wheel",
+        )
+
+    assert zh is not None
+    assert "輪" in zh
+
+
+@pytest.mark.asyncio
 async def test_ensure_zh_passes_entry_context_to_translate(client, db_session) -> None:
     from app.models.dictionary import DictionaryEntry
 
@@ -256,6 +290,44 @@ async def test_clear_zh_hant_parent_can_clear(client, db_session) -> None:
     )
 
     assert response.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_lookup_does_not_refill_cleared_zh(client, db_session) -> None:
+    from datetime import UTC, datetime
+
+    from app.models.dictionary import DictionaryEntry
+
+    token = await _login(client, "leo", "leo")
+    entry = DictionaryEntry(
+        word="e2eline",
+        definition="A long thin mark on a surface.",
+        source="e2e",
+        fetched_at=datetime.now(UTC),
+        definition_zh_hant="錯誤翻譯",
+    )
+    db_session.add(entry)
+    await db_session.commit()
+    await db_session.refresh(entry)
+
+    cleared = await client.delete(
+        f"/api/v1/dictionary/entries/{entry.id}/zh-hant",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert cleared.status_code == 200
+
+    with patch(
+        "app.services.dictionary_service.translate_definition_to_zh_hant",
+        new_callable=AsyncMock,
+        return_value="表面上有一個細長的痕跡。",
+    ):
+        lookup = await client.get(
+            "/api/v1/dictionary/words/e2eline",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert lookup.status_code == 200
+    assert lookup.json()["definition_zh_hant"] is None
 
 
 @pytest.mark.asyncio

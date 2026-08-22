@@ -5,6 +5,7 @@ from app.api.deps import require_learner
 from app.core.rate_limit import limiter
 from app.database import get_db
 from app.models.user import User
+from app.schemas.book import BookProgress
 from app.schemas.loop import (
     ChallengeSourceOptionsResponse,
     DailyChallengeCompleteResponse,
@@ -16,7 +17,7 @@ from app.schemas.loop import (
     QuestStrengthSummary,
     RegenerateDailyMixRequest,
 )
-from app.services import achievement_service, loop_engine
+from app.services import achievement_service, book_service, loop_engine
 
 router = APIRouter(prefix="/loop", tags=["loop"])
 
@@ -200,6 +201,21 @@ async def get_loop_progress(
         )
     data = await loop_engine.progress_summary(db, learner_id=learner.id)
     return LoopProgressResponse(**data)
+
+
+@router.get("/book-progress", response_model=BookProgress | None)
+async def get_book_progress(
+    user: User = Depends(require_learner),
+    db: AsyncSession = Depends(get_db),
+) -> BookProgress | None:
+    learner = user.learner_profile
+    if learner is None:
+        return None
+    book = await book_service.get_active_book_for_learner(db, learner.id)
+    if book is None:
+        return None
+    data = await book_service.progress_for_learner(db, book, learner.id)
+    return BookProgress(**data)
 
 
 @router.get("/words", response_model=LearnerWordsResponse)

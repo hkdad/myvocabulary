@@ -2,6 +2,8 @@ import { inProgressCount, strengthSegments, type StrengthCounts } from "../../li
 
 type Props = {
   counts: StrengthCounts;
+  /** Override bar segment scale (defaults to in-progress count, else bank_total). */
+  barDenominator?: number;
   barClassName?: string;
   showTags?: boolean;
   ariaLabel: string;
@@ -9,13 +11,16 @@ type Props = {
 
 export default function StrengthProgressBar({
   counts,
+  barDenominator,
   barClassName = "h-3",
   showTags = true,
   ariaLabel,
 }: Props) {
   const total = counts.bank_total;
-  const segments = strengthSegments(counts, total);
   const progress = inProgressCount(counts);
+  // Scale bar to in-progress words so tiny bank slices do not render as stray slivers.
+  const barTotal = barDenominator ?? (progress > 0 ? progress : total);
+  const segments = strengthSegments(counts, barTotal);
 
   return (
     <div>

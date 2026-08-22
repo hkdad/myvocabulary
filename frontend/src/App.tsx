@@ -22,6 +22,7 @@ import WordListDetailPage from "./pages/parent/WordListDetailPage";
 import WordListsPage from "./pages/parent/WordListsPage";
 import WordBankPage from "./pages/parent/WordBankPage";
 import ParentQuestsPage from "./pages/parent/ParentQuestsPage";
+import BooksPage from "./pages/parent/BooksPage";
 import { useAuthStore } from "./stores/authStore";
 
 const queryClient = new QueryClient();
@@ -43,6 +44,7 @@ function AppRoutes() {
           <Route path="/parent/word-lists" element={<WordListsPage />} />
           <Route path="/parent/word-bank" element={<WordBankPage />} />
           <Route path="/parent/quests" element={<ParentQuestsPage />} />
+          <Route path="/parent/books" element={<BooksPage />} />
           <Route path="/parent/word-lists/:id" element={<WordListDetailPage />} />
         </Route>
         <Route element={<RoleRoute role="learner" />}>

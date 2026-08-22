@@ -1,8 +1,8 @@
 # Project Status
 
-**Last updated:** 2026-08-04  
-**Status:** Phase 2 P2.0 Loop MVP shipped on `main` · recognition-first + readiness-gated Level-up · P2.1 polish in progress  
-**Latest merges:** #31 readiness gate + Max seed · #30 Mastered@3 days + word progress · #29 CERT docs/UX · #26–#28 lazy 繁中, recognition-first loop, MC challenges  
+**Last updated:** 2026-08-22  
+**Status:** Phase 2 P2.0 Loop MVP shipped on `main` · recognition-first + readiness-gated Level-up · P2.1 polish in progress · Book as Word Bank v1  
+**Latest merges:** #4 docker.home deploy · #3 parent quests  
 
 **Test accounts:** `parent`/`parent123`, `mia`/`mia`, `leo`/`leo`, `max`/`max`
 
@@ -72,6 +72,7 @@ See [phase-2-spec.md](./phase-2-spec.md) §1.6 (pedagogy) and §5.3 (readiness).
 - Parent dashboard + learner stats
 - AI level assessment + challenges
 - Docker deployment via `./start.sh`
+- Book as Word Bank: parent uploads txt/epub → parse preview → 80% content study set → Daily Challenge new words from the active book, retention from the family bank. Metrics: **Book progress** + **Page coverage** (not Level Readiness).
 
 ---
 

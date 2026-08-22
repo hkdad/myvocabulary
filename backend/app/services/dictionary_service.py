@@ -1,3 +1,4 @@
+import asyncio
 import json
 import re
 from datetime import UTC, datetime, timedelta
@@ -11,6 +12,9 @@ from app.config import get_settings
 from app.models.dictionary import DictionaryEntry
 
 CACHE_DAYS = 30
+PREFETCH_DEADLINE_SECONDS = 3.0
+PREFETCH_PER_WORD_TIMEOUT = 2.0
+CONFIRM_PREFETCH_DEADLINE_SECONDS = 45.0
 _PREFERRED_POS = ("noun", "verb", "adjective", "adverb")
 
 
@@ -261,6 +265,235 @@ async def fetch_from_api(word: str) -> dict:
         return await _fetch_fallback(word)
 
 
+def is_placeholder_definition(entry: DictionaryEntry) -> bool:
+    definition = (entry.definition or "").strip()
+    return entry.source == "placeholder" or definition.startswith("Definition pending")
+
+
+def _parse_kid_definition_json(text: str, word: str) -> dict | None:
+    cleaned = text.strip()
+    if not cleaned:
+        return None
+    fence = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", cleaned, re.DOTALL)
+    candidate = fence.group(1) if fence else cleaned
+    match = re.search(r"\{.*\}", candidate, re.DOTALL)
+    if not match:
+        return None
+    try:
+        payload = json.loads(match.group(0))
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    definition = str(payload.get("definition") or "").strip()
+    if not definition:
+        return None
+    return {
+        "word": normalize_word(word),
+        "part_of_speech": str(payload.get("pos") or payload.get("part_of_speech") or "").strip()
+        or None,
+        "definition": definition,
+        "example_sentence": str(
+            payload.get("example") or payload.get("example_sentence") or ""
+        ).strip()
+        or None,
+        "source": "ollama",
+        "fetched_at": datetime.now(UTC),
+    }
+
+
+async def generate_kid_definition(word: str) -> dict | None:
+    """Kid-friendly gloss via local Ollama only.
+
+    Returns None on failure — caller falls back to fetch_from_api.
+    """
+    settings = get_settings()
+    api_base = settings.openai_api_base.rstrip("/")
+    is_ollama = ":11434" in api_base or api_base.startswith("http://127.0.0.1:11434")
+    if not is_ollama:
+        return None
+
+    prompt = (
+        "Write a kid-friendly English dictionary entry. "
+        'Reply with JSON only: {"word":"...","pos":"...","definition":"...","example":"..."}. '
+        "Short definition a child can understand. One simple example sentence. "
+        f"Word: {word}"
+    )
+    ollama_root = api_base[: -len("/v1")] if api_base.endswith("/v1") else api_base
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            gen = await client.post(
+                f"{ollama_root}/api/generate",
+                json={
+                    "model": settings.openai_model,
+                    "prompt": prompt,
+                    "stream": False,
+                    "options": {"temperature": 0.2, "num_predict": 120},
+                },
+            )
+            if gen.status_code == 200:
+                parsed = _parse_kid_definition_json(str(gen.json().get("response") or ""), word)
+                if parsed:
+                    return parsed
+    except Exception:
+        return None
+    return None
+
+
+def _definition_lookup_variants(word: str) -> list[str]:
+    """Alternate spellings when book lemmatization or OCR produced a bad token."""
+    normalized = normalize_word(word)
+    variants = [normalized]
+    # Repair fallback -s strip on -ous adjectives (conscious → consciou).
+    if normalized.endswith("ou") and len(normalized) > 4:
+        repaired = normalized + "s"
+        if repaired not in variants:
+            variants.append(repaired)
+    return variants
+
+
+def _apply_definition_payload(entry: DictionaryEntry, payload: dict, *, lookup_word: str) -> None:
+    entry.definition = payload["definition"]
+    if payload.get("part_of_speech"):
+        entry.part_of_speech = payload["part_of_speech"]
+    if payload.get("example_sentence"):
+        entry.example_sentence = payload["example_sentence"]
+    if payload.get("phonetic"):
+        entry.phonetic = payload["phonetic"]
+    entry.source = payload.get("source") or entry.source
+    entry.source_url = payload.get("source_url") or entry.source_url
+    entry.fetched_at = payload.get("fetched_at") or datetime.now(UTC)
+    resolved = normalize_word(str(payload.get("word") or lookup_word))
+    if resolved and resolved != entry.word:
+        entry.word = resolved
+
+
+async def fill_placeholder_definition(db: AsyncSession, entry: DictionaryEntry) -> DictionaryEntry:
+    """Fill a placeholder gloss before a card is shown. Never raises."""
+    if not is_placeholder_definition(entry):
+        return entry
+    for candidate in _definition_lookup_variants(entry.word):
+        payload = await generate_kid_definition(candidate)
+        if payload is None:
+            try:
+                payload = await fetch_from_api(candidate)
+            except Exception:
+                payload = None
+        if not payload or not payload.get("definition"):
+            continue
+        _apply_definition_payload(entry, payload, lookup_word=candidate)
+        await db.flush()
+        return entry
+    return entry
+
+
+async def _prefetch_with_deadline(
+    db: AsyncSession,
+    entries: list[DictionaryEntry],
+    *,
+    deadline_seconds: float,
+    per_word_timeout: float,
+) -> int:
+    """Fill placeholder glosses within a time budget. Returns count newly cached. Never raises."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + deadline_seconds
+    filled = 0
+    for entry in entries:
+        if not is_placeholder_definition(entry):
+            continue
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            break
+        try:
+            await asyncio.wait_for(
+                fill_placeholder_definition(db, entry),
+                timeout=min(per_word_timeout, remaining),
+            )
+            if not is_placeholder_definition(entry):
+                filled += 1
+        except (TimeoutError, Exception):
+            continue
+    return filled
+
+
+async def _commit_cached_definitions(db: AsyncSession, filled_count: int) -> None:
+    """Persist filled glosses to dictionary_entries so the next request skips external APIs."""
+    if filled_count > 0:
+        await db.commit()
+
+
+async def prefetch_challenge_definitions(db: AsyncSession, entries: list[DictionaryEntry]) -> None:
+    """Best-effort gloss fill before returning today's mix.
+
+    Bounded so kids are not left waiting on slow dictionary APIs.
+    """
+    placeholders = [entry for entry in entries if is_placeholder_definition(entry)]
+    if not placeholders:
+        return
+    # Scale budget with deck size (7-card mix needs more than 3s when API is slow).
+    deadline = min(PREFETCH_DEADLINE_SECONDS + len(placeholders) * 1.5, 12.0)
+    filled = await _prefetch_with_deadline(
+        db,
+        placeholders,
+        deadline_seconds=deadline,
+        per_word_timeout=PREFETCH_PER_WORD_TIMEOUT,
+    )
+    await _commit_cached_definitions(db, filled)
+
+
+async def ensure_definitions_for_entry_ids(
+    db: AsyncSession, entry_ids: list[int]
+) -> list[dict[str, int | str | None]]:
+    """Fill placeholder glosses for MCQ cards. Returns entries that have a real definition."""
+    unique_ids = list(dict.fromkeys(entry_id for entry_id in entry_ids if entry_id > 0))
+    if not unique_ids:
+        return []
+
+    result = await db.execute(select(DictionaryEntry).where(DictionaryEntry.id.in_(unique_ids)))
+    entries = {entry.id: entry for entry in result.scalars().all()}
+
+    touched = False
+    filled: list[dict[str, int | str | None]] = []
+    for entry_id in unique_ids:
+        entry = entries.get(entry_id)
+        if entry is None:
+            continue
+        if is_placeholder_definition(entry):
+            await fill_placeholder_definition(db, entry)
+            touched = True
+        if not is_placeholder_definition(entry):
+            if not (entry.definition_zh_hant and entry.definition_zh_hant.strip()):
+                zh = await translate_definition_to_zh_hant(
+                    entry.definition, **_translation_kwargs(entry)
+                )
+                if zh:
+                    entry.definition_zh_hant = zh
+                    touched = True
+            filled.append(
+                {
+                    "id": entry.id,
+                    "definition": entry.definition,
+                    "part_of_speech": entry.part_of_speech,
+                    "definition_zh_hant": entry.definition_zh_hant,
+                }
+            )
+    if touched:
+        await db.commit()
+    return filled
+
+
+async def prefetch_study_set_definitions(db: AsyncSession, entries: list[DictionaryEntry]) -> None:
+    """Parent confirm path — longer budget since this runs once per book."""
+    placeholders = [entry for entry in entries if is_placeholder_definition(entry)]
+    filled = await _prefetch_with_deadline(
+        db,
+        placeholders,
+        deadline_seconds=CONFIRM_PREFETCH_DEADLINE_SECONDS,
+        per_word_timeout=8.0,
+    )
+    await _commit_cached_definitions(db, filled)
+
+
 _CJK_RE = re.compile(r"[\u3400-\u9FFF]+")
 _PLACEHOLDER_ZH = {"...", "…", "—", "-", "<gloss>", "TRANSLATION_HERE"}
 
@@ -346,8 +579,13 @@ async def translate_definition_to_zh_hant(
     """Translate an English gloss to Traditional Chinese. Returns None if unavailable."""
     settings = get_settings()
     cleaned = definition.strip()
-    if not cleaned or not settings.openai_api_key:
+    if not cleaned:
         return None
+
+    api_base = settings.openai_api_base.rstrip("/")
+    # Only local Ollama — do not treat every ".../v1" provider (e.g. OpenCode) as Ollama.
+    is_ollama = ":11434" in api_base or api_base.startswith("http://127.0.0.1:11434")
+    has_llm = bool(settings.openai_api_key) or is_ollama
 
     user_content = _build_translation_context(
         definition=cleaned,
@@ -356,65 +594,90 @@ async def translate_definition_to_zh_hant(
         example_sentence=example_sentence,
     )
 
-    api_base = settings.openai_api_base.rstrip("/")
-    # Only local Ollama — do not treat every ".../v1" provider (e.g. OpenCode) as Ollama.
-    is_ollama = ":11434" in api_base or api_base.startswith("http://127.0.0.1:11434")
     ollama_root = api_base[: -len("/v1")] if api_base.endswith("/v1") else api_base
 
-    try:
-        async with httpx.AsyncClient(timeout=90.0) as client:
-            # Local Ollama/MLX: /api/generate returns Chinese quickly. The OpenAI-compat
-            # chat endpoint often parks the answer in "reasoning" and leaves content empty.
-            if is_ollama:
-                gen = await client.post(
-                    f"{ollama_root}/api/generate",
-                    json={
-                        "model": settings.openai_model,
-                        "prompt": (
-                            "Translate the meaning of this English dictionary entry into "
-                            "Traditional Chinese (繁體中文). Match THIS definition only — "
-                            "do not use other senses of the word. "
-                            "Reply with ONLY the Chinese gloss:\n"
-                            f"{user_content}"
-                        ),
-                        "stream": False,
-                        "options": {"temperature": 0.2, "num_predict": 80},
-                    },
-                )
-                if gen.status_code == 200:
-                    zh = _extract_zh_hant(str(gen.json().get("response") or ""))
+    if has_llm:
+        try:
+            async with httpx.AsyncClient(timeout=90.0) as client:
+                # Local Ollama/MLX: /api/generate returns Chinese quickly.
+                if is_ollama:
+                    gen = await client.post(
+                        f"{ollama_root}/api/generate",
+                        json={
+                            "model": settings.openai_model,
+                            "prompt": (
+                                "Translate the meaning of this English dictionary entry into "
+                                "Traditional Chinese (繁體中文). Match THIS definition only — "
+                                "do not use other senses of the word. "
+                                "Reply with ONLY the Chinese gloss:\n"
+                                f"{user_content}"
+                            ),
+                            "stream": False,
+                            "options": {"temperature": 0.2, "num_predict": 80},
+                        },
+                    )
+                    if gen.status_code == 200:
+                        zh = _extract_zh_hant(str(gen.json().get("response") or ""))
+                        if zh:
+                            return zh
+
+                if settings.openai_api_key:
+                    system = (
+                        "You translate English dictionary definitions into Traditional Chinese "
+                        "(繁體中文) for Hong Kong / Taiwan learners. "
+                        'Reply with JSON only in this exact shape: {"zh_hant":"<gloss>"}. '
+                        "Translate the meaning of THIS definition only — do not pick other senses "
+                        "of the word. Short, natural gloss; no pinyin; no English."
+                    )
+                    response = await client.post(
+                        f"{api_base}/chat/completions",
+                        headers={"Authorization": f"Bearer {settings.openai_api_key}"},
+                        json={
+                            "model": settings.openai_model,
+                            "messages": [
+                                {"role": "system", "content": system},
+                                {"role": "user", "content": user_content},
+                            ],
+                            "temperature": 0.2,
+                            "max_tokens": 1024,
+                        },
+                    )
+                    response.raise_for_status()
+                    message = response.json()["choices"][0]["message"]
+                    content = str(message.get("content") or "").strip()
+                    zh = _extract_zh_hant(content) if content else None
                     if zh:
                         return zh
 
-            system = (
-                "You translate English dictionary definitions into Traditional Chinese "
-                "(繁體中文) for Hong Kong / Taiwan learners. "
-                'Reply with JSON only in this exact shape: {"zh_hant":"<gloss>"}. '
-                "Translate the meaning of THIS definition only — do not pick other senses "
-                "of the word. Short, natural gloss; no pinyin; no English."
-            )
-            response = await client.post(
-                f"{api_base}/chat/completions",
-                headers={"Authorization": f"Bearer {settings.openai_api_key}"},
-                json={
-                    "model": settings.openai_model,
-                    "messages": [
-                        {"role": "system", "content": system},
-                        {"role": "user", "content": user_content},
-                    ],
-                    "temperature": 0.2,
-                    "max_tokens": 1024,
-                },
-            )
-            response.raise_for_status()
-            message = response.json()["choices"][0]["message"]
-            content = str(message.get("content") or "").strip()
-            zh = _extract_zh_hant(content) if content else None
-            if zh:
-                return zh
+                    reasoning = str(message.get("reasoning") or "").strip()
+                    if reasoning:
+                        zh = _extract_zh_hant(reasoning)
+                        if zh:
+                            return zh
+        except Exception:
+            pass
+    return await _translate_via_mymemory(cleaned)
 
-            reasoning = str(message.get("reasoning") or "").strip()
-            return _extract_zh_hant(reasoning) if reasoning else None
+
+async def _translate_via_mymemory(definition: str) -> str | None:
+    """Free EN→zh-TW fallback when no LLM/Ollama is configured."""
+    cleaned = definition.strip()
+    if not cleaned:
+        return None
+    text = cleaned[:480]
+    try:
+        async with httpx.AsyncClient(timeout=12.0) as client:
+            response = await client.get(
+                "https://api.mymemory.translated.net/get",
+                params={"q": text, "langpair": "en|zh-TW"},
+            )
+            if response.status_code != 200:
+                return None
+            payload = response.json()
+            translated = str(payload.get("responseData", {}).get("translatedText") or "").strip()
+            if not translated or translated.casefold() == cleaned.casefold():
+                return None
+            return _extract_zh_hant(translated)
     except Exception:
         return None
 
@@ -502,8 +765,8 @@ async def lookup_word(db: AsyncSession, word: str) -> DictionaryEntry:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Word is required")
 
     existing = await get_entry_by_word(db, normalized)
-    if existing and _is_cache_fresh(existing):
-        return await ensure_zh_hant(db, existing)
+    if existing and _is_cache_fresh(existing) and not is_placeholder_definition(existing):
+        return existing
 
     data = await fetch_from_api(normalized)
     if existing:
@@ -519,13 +782,13 @@ async def lookup_word(db: AsyncSession, word: str) -> DictionaryEntry:
         existing.fetched_at = data["fetched_at"]
         await db.commit()
         await db.refresh(existing)
-        return await ensure_zh_hant(db, existing)
+        return existing
 
     entry = DictionaryEntry(**data)
     db.add(entry)
     await db.commit()
     await db.refresh(entry)
-    return await ensure_zh_hant(db, entry)
+    return entry
 
 
 async def create_manual_entry(
