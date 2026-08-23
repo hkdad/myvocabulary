@@ -71,6 +71,72 @@ def level_matches_at_or_below(item_level: str | None, learner_level: str) -> boo
     return False
 
 
+def level_matches_at_or_above(item_level: str | None, learner_level: str) -> bool:
+    """True when a bank word is at or above the learner CEFR band."""
+    if not item_level or not item_level.strip():
+        return False
+    if not learner_level or not learner_level.strip():
+        return False
+
+    item = item_level.strip()
+    learner = learner_level.strip()
+    if item.lower() == learner.lower():
+        return True
+
+    item_cefr = normalize_level_label(item)
+    learner_cefr = normalize_level_label(learner)
+    if item_cefr in CEFR_LEVELS and learner_cefr in CEFR_LEVELS:
+        return CEFR_LEVELS.index(item_cefr) >= CEFR_LEVELS.index(learner_cefr)
+    return False
+
+
+def filter_study_ids_by_level(
+    entry_ids: set[int],
+    level_map: dict[int, str | None],
+    learner_level: str,
+    *,
+    mode: str = "at_or_above",
+) -> set[int]:
+    """Keep book study entries that pass the level rule; unbanked (None) always keep."""
+    kept: set[int] = set()
+    for entry_id in entry_ids:
+        bank_level = level_map.get(entry_id)
+        if bank_level is None:
+            kept.add(entry_id)
+            continue
+        if mode == "exact":
+            if level_matches(bank_level, learner_level):
+                kept.add(entry_id)
+        elif level_matches_at_or_above(bank_level, learner_level):
+            kept.add(entry_id)
+    return kept
+
+
+async def entry_levels_from_bank(
+    db: AsyncSession,
+    *,
+    parent_id: int,
+    entry_ids: set[int],
+) -> dict[int, str | None]:
+    """Map dictionary entry IDs → family-bank CEFR level (None when unbanked)."""
+    if not entry_ids:
+        return {}
+    bank = await get_family_bank(db, parent_id)
+    level_map: dict[int, str | None] = {entry_id: None for entry_id in entry_ids}
+    if bank is None:
+        return level_map
+    result = await db.execute(
+        select(WordListItem.dictionary_entry_id, WordListItem.level).where(
+            WordListItem.word_list_id == bank.id,
+            WordListItem.dictionary_entry_id.in_(entry_ids),
+        )
+    )
+    for entry_id, item_level in result.all():
+        cleaned = (item_level or "").strip() or None
+        level_map[entry_id] = cleaned
+    return level_map
+
+
 def derive_strength(*, distinct_review_days: int) -> str:
     """Bucket a released card by distinct UTC days with at least one correct review."""
     if distinct_review_days >= MASTERED_MIN_DISTINCT_DAYS:
@@ -1007,6 +1073,7 @@ async def build_daily_mix(
     await reconcile_mismatched_bank_cards(db, learner=learner, parent_id=parent_id, now=now)
 
     auto_book = False
+    book_new_drip_empty = False
     if entry_id_allowlist is None and source_word_list_id is None:
         from app.services import book_service
 
@@ -1014,8 +1081,18 @@ async def build_daily_mix(
         if active_book is not None and active_book.word_list_id is not None:
             study_ids = await book_service.study_entry_ids(db, active_book)
             if study_ids:
+                level_map = await entry_levels_from_bank(
+                    db, parent_id=parent_id, entry_ids=study_ids
+                )
+                filtered_ids = filter_study_ids_by_level(
+                    study_ids,
+                    level_map,
+                    learner.english_level,
+                    mode="at_or_above",
+                )
+                book_new_drip_empty = len(filtered_ids) == 0
                 auto_book = True
-                entry_id_allowlist = study_ids
+                entry_id_allowlist = filtered_ids
                 source_word_list_id = active_book.word_list_id
                 source_kind = source_kind or "book"
                 source_ref = source_ref or str(active_book.word_list_id)
@@ -1274,6 +1351,7 @@ async def build_daily_mix(
         "book_learning_count": None,
         "book_familiar_count": None,
         "book_mastered_count": None,
+        "book_new_drip_empty": None,
     }
     if auto_book or (log.source_kind == "book"):
         from app.services import book_service
@@ -1289,6 +1367,7 @@ async def build_daily_mix(
             mix["book_learning_count"] = progress["learning_count"]
             mix["book_familiar_count"] = progress["familiar_count"]
             mix["book_mastered_count"] = progress["mastered_count"]
+            mix["book_new_drip_empty"] = book_new_drip_empty
     return mix
 
 
