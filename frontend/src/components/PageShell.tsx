@@ -21,7 +21,7 @@ export default function PageShell({
   const [blobA, blobB] = blobColors[variant];
 
   return (
-    <div className={`relative min-h-screen overflow-hidden ${className}`}>
+    <div className={`relative min-h-screen overflow-x-hidden ${className}`}>
       <div
         className="page-blob -left-20 -top-20 h-64 w-64"
         style={{ background: blobA }}

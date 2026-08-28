@@ -1,3 +1,4 @@
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -7,9 +8,16 @@ from fastapi.staticfiles import StaticFiles
 
 from app.api.v1.router import router as api_v1_router
 from app.config import get_settings
+from app.startup import fail_orphaned_definition_fill_jobs
 from app.version import get_version
 
 settings = get_settings()
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    await fail_orphaned_definition_fill_jobs()
+    yield
 
 
 def create_app() -> FastAPI:
@@ -18,6 +26,7 @@ def create_app() -> FastAPI:
         version=get_version(),
         docs_url="/docs" if settings.debug else None,
         redoc_url="/redoc" if settings.debug else None,
+        lifespan=lifespan,
     )
 
     app.add_middleware(
