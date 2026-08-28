@@ -1,6 +1,7 @@
 from app.models.book import Book, BookLemma
 from app.models.challenge import LearnerBadge, LevelAssessment, LevelChallenge
 from app.models.daily_challenge import DailyChallengeLog
+from app.models.definition_fill_job import DefinitionFillJob
 from app.models.dictation import DictationAttempt, DictationSession
 from app.models.dictionary import DictionaryEntry
 from app.models.learner import Learner
@@ -32,6 +33,7 @@ __all__ = [
     "LevelAssessment",
     "LearnerBadge",
     "DailyChallengeLog",
+    "DefinitionFillJob",
     "Book",
     "BookLemma",
 ]

@@ -3,17 +3,28 @@ import { Link } from "react-router-dom";
 
 import {
   assignBook,
+  bulkHideBookLemmas,
+  cancelBookDefinitionFillJob,
   confirmBook,
   deleteBook,
   getBook,
   getBookProgress,
+  getBooksDefinitionsSummary,
+  getCurrentBookDefinitionFillJob,
+  getPlaceholderLemmas,
+  getSuspiciousLemmas,
   hideBookLemma,
   listBooks,
   previewBook,
+  startBookDefinitionFillJob,
   unassignBook,
   updateBookTitle,
+  type BookDefinitionsSummary,
   type BookProgress,
   type BookSummary,
+  type DefinitionFillJob,
+  type PlaceholderLemma,
+  type SuspiciousLemma,
 } from "../../api/books";
 import { listLearners, type LearnerProfile } from "../../api/learners";
 import LearnerAvatar from "../../components/LearnerAvatar";
@@ -21,6 +32,23 @@ import PageShell from "../../components/PageShell";
 
 function coverageLabel(target: number): string {
   return target >= 0.9 ? "Read independently (90%)" : "Read with help (80%)";
+}
+
+function suspiciousReasonLabel(reason: string): string {
+  switch (reason) {
+    case "too_short":
+      return "Too short";
+    case "single_letter":
+      return "Single letter";
+    case "html_artifact":
+      return "HTML artifact";
+    case "non_alpha":
+      return "Non-alphabetic";
+    case "broken_lemma":
+      return "Broken lemma";
+    default:
+      return reason;
+  }
 }
 
 function statusBadge(status: string, coverageTarget: number) {
@@ -68,6 +96,9 @@ function ConfirmStudySetButtons({
     </div>
   );
 }
+
+const ACTIVE_JOB_STATUSES = new Set(["queued", "running"]);
+
 function stepState(
   selected: BookSummary | null,
 ): { upload: boolean; confirm: boolean; assign: boolean } {
@@ -99,17 +130,46 @@ export default function BooksPage() {
   const [error, setError] = useState<string | null>(null);
   const [titleDraft, setTitleDraft] = useState("");
   const [hidingLemmaId, setHidingLemmaId] = useState<number | null>(null);
+  const [suspiciousOpen, setSuspiciousOpen] = useState(false);
+  const [suspiciousRows, setSuspiciousRows] = useState<SuspiciousLemma[]>([]);
+  const [suspiciousLoading, setSuspiciousLoading] = useState(false);
+  const [suspiciousSelected, setSuspiciousSelected] = useState<Set<number>>(new Set());
+  const [suspiciousHiding, setSuspiciousHiding] = useState(false);
+  const [definitionsSummary, setDefinitionsSummary] = useState<BookDefinitionsSummary | null>(
+    null,
+  );
+  const [fillJob, setFillJob] = useState<DefinitionFillJob | null>(null);
+  const [startingFill, setStartingFill] = useState(false);
+  const [failedOpen, setFailedOpen] = useState(false);
+  const [failedRows, setFailedRows] = useState<PlaceholderLemma[]>([]);
+  const [failedLoading, setFailedLoading] = useState(false);
+  const [failedSelected, setFailedSelected] = useState<Set<number>>(new Set());
+  const [failedHiding, setFailedHiding] = useState(false);
+  const [failedFallbackAll, setFailedFallbackAll] = useState(false);
   const assignSectionRef = useRef<HTMLDivElement>(null);
 
   const steps = stepState(selected);
+  const jobActive = fillJob !== null && ACTIVE_JOB_STATUSES.has(fillJob.status);
+  const hasConfirmedBooks = books.some((book) => book.status === "confirmed");
 
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const [bookRows, learnerRows] = await Promise.all([listBooks(), listLearners()]);
+      const [bookRows, learnerRows, summary] = await Promise.all([
+        listBooks(),
+        listLearners(),
+        getBooksDefinitionsSummary(),
+      ]);
       setBooks(bookRows);
       setLearners(learnerRows.filter((row) => row.is_active));
+      setDefinitionsSummary(summary);
+      try {
+        const currentJob = await getCurrentBookDefinitionFillJob();
+        setFillJob(currentJob);
+      } catch {
+        setFillJob(null);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load books");
     } finally {
@@ -120,6 +180,23 @@ export default function BooksPage() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  useEffect(() => {
+    if (!jobActive) {
+      return;
+    }
+    const timer = window.setInterval(() => {
+      void getCurrentBookDefinitionFillJob()
+        .then((job) => {
+          setFillJob(job);
+          if (job && !ACTIVE_JOB_STATUSES.has(job.status)) {
+            void load();
+          }
+        })
+        .catch(() => undefined);
+    }, 2000);
+    return () => window.clearInterval(timer);
+  }, [jobActive, load]);
 
   useEffect(() => {
     if (selected) {
@@ -289,6 +366,163 @@ export default function BooksPage() {
     }
   }
 
+  async function openSuspiciousScan() {
+    if (!selected) {
+      return;
+    }
+    setSuspiciousOpen(true);
+    setSuspiciousLoading(true);
+    setError(null);
+    try {
+      const rows = await getSuspiciousLemmas(selected.id, true);
+      setSuspiciousRows(rows);
+      setSuspiciousSelected(
+        new Set(rows.filter((row) => !row.is_hidden).map((row) => row.id)),
+      );
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not scan suspicious words");
+      setSuspiciousOpen(false);
+    } finally {
+      setSuspiciousLoading(false);
+    }
+  }
+
+  function toggleSuspiciousSelection(lemmaId: number) {
+    setSuspiciousSelected((current) => {
+      const next = new Set(current);
+      if (next.has(lemmaId)) {
+        next.delete(lemmaId);
+      } else {
+        next.add(lemmaId);
+      }
+      return next;
+    });
+  }
+
+  async function handleBulkHideSuspicious(hidden: boolean, lemmaIds?: number[]) {
+    if (!selected) {
+      return;
+    }
+    const ids = lemmaIds ?? Array.from(suspiciousSelected);
+    if (ids.length === 0) {
+      return;
+    }
+    setSuspiciousHiding(true);
+    setError(null);
+    try {
+      const updated = await bulkHideBookLemmas(selected.id, ids, hidden);
+      setSelected(updated);
+      await load();
+      const rows = await getSuspiciousLemmas(selected.id, true);
+      setSuspiciousRows(rows);
+      setSuspiciousSelected(
+        new Set(rows.filter((row) => !row.is_hidden).map((row) => row.id)),
+      );
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not update words");
+    } finally {
+      setSuspiciousHiding(false);
+    }
+  }
+
+  async function openFailedWords() {
+    if (!fillJob) {
+      return;
+    }
+    setFailedOpen(true);
+    setFailedLoading(true);
+    setError(null);
+    try {
+      let rows = await getPlaceholderLemmas(fillJob.id, true);
+      let fallbackAll = false;
+      if (rows.length === 0 && fillJob.failed > 0) {
+        rows = await getPlaceholderLemmas(undefined, true);
+        fallbackAll = rows.length > 0;
+      }
+      setFailedFallbackAll(fallbackAll);
+      setFailedRows(rows);
+      setFailedSelected(new Set(rows.filter((row) => !row.is_hidden).map((row) => row.id)));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not load failed words");
+      setFailedOpen(false);
+    } finally {
+      setFailedLoading(false);
+    }
+  }
+
+  function toggleFailedSelection(lemmaId: number) {
+    setFailedSelected((current) => {
+      const next = new Set(current);
+      if (next.has(lemmaId)) {
+        next.delete(lemmaId);
+      } else {
+        next.add(lemmaId);
+      }
+      return next;
+    });
+  }
+
+  async function handleBulkHideFailed(hidden: boolean, lemmaIds?: number[]) {
+    const ids = lemmaIds ?? Array.from(failedSelected);
+    if (ids.length === 0) {
+      return;
+    }
+    const byBook = new Map<number, number[]>();
+    for (const row of failedRows) {
+      if (!ids.includes(row.id)) {
+        continue;
+      }
+      const bookIds = byBook.get(row.book_id) ?? [];
+      bookIds.push(row.id);
+      byBook.set(row.book_id, bookIds);
+    }
+    setFailedHiding(true);
+    setError(null);
+    try {
+      for (const [bookId, bookLemmaIds] of byBook) {
+        await bulkHideBookLemmas(bookId, bookLemmaIds, hidden);
+      }
+      await load();
+      if (fillJob) {
+        const rows = await getPlaceholderLemmas(fillJob.id, true);
+        setFailedRows(rows);
+        setFailedSelected(new Set(rows.filter((row) => !row.is_hidden).map((row) => row.id)));
+      }
+      if (selected) {
+        setSelected(await getBook(selected.id));
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not update words");
+    } finally {
+      setFailedHiding(false);
+    }
+  }
+
+  async function handleStartDefinitionFill() {
+    setStartingFill(true);
+    setError(null);
+    try {
+      const job = await startBookDefinitionFillJob();
+      setFillJob(job);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not start definition fill");
+    } finally {
+      setStartingFill(false);
+    }
+  }
+
+  async function handleCancelDefinitionFill() {
+    if (!fillJob) {
+      return;
+    }
+    try {
+      const job = await cancelBookDefinitionFillJob(fillJob.id);
+      setFillJob(job);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not cancel job");
+    }
+  }
+
   return (
     <PageShell variant="parent">
       <main className="mx-auto flex min-h-screen max-w-4xl flex-col gap-6 p-6 sm:p-8">
@@ -299,12 +533,130 @@ export default function BooksPage() {
             <p className="mt-1 text-sm text-warm-brown-soft">
               Upload → name & confirm → assign to a child. Their daily challenge drips book words;
               bank retention stays warm.
+              {definitionsSummary && definitionsSummary.missing_en_count > 0 && (
+                <>
+                  {" "}
+                  · {definitionsSummary.missing_en_count.toLocaleString()} book words need
+                  English definitions
+                </>
+              )}
             </p>
           </div>
-          <Link to="/parent/dashboard" className="warm-btn warm-btn-secondary text-sm">
-            Back to dashboard
-          </Link>
+          <div className="flex flex-wrap gap-2">
+            {definitionsSummary && definitionsSummary.missing_en_count > 0 && (
+              <button
+                type="button"
+                className="warm-btn warm-btn-primary text-sm"
+                disabled={startingFill || jobActive}
+                onClick={() => void handleStartDefinitionFill()}
+              >
+                {startingFill
+                  ? "Starting…"
+                  : jobActive
+                    ? "Filling English…"
+                    : "Fill English definitions"}
+              </button>
+            )}
+            <Link to="/parent/dashboard" className="warm-btn warm-btn-secondary text-sm">
+              Back to dashboard
+            </Link>
+          </div>
         </header>
+
+        {fillJob &&
+          (jobActive || fillJob.status === "completed" || fillJob.status === "failed") && (
+            <section className="warm-card p-4">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div className="min-w-0 flex-1">
+                  <p className="text-sm font-bold text-warm-brown">English definition fill job</p>
+                  <p className="mt-1 text-sm text-warm-brown-soft">
+                    Dictionary API only · Chinese fills during practice ·{" "}
+                    {fillJob.filled.toLocaleString()} done · {fillJob.failed.toLocaleString()}{" "}
+                    failed · {fillJob.processed.toLocaleString()} /{" "}
+                    {fillJob.total.toLocaleString()} processed
+                  </p>
+                  {definitionsSummary && (
+                    <p className="mt-1 text-xs text-warm-muted">
+                      {definitionsSummary.missing_en_count.toLocaleString()} missing English ·{" "}
+                      {definitionsSummary.missing_zh_count.toLocaleString()} missing Chinese
+                    </p>
+                  )}
+                  {fillJob.status === "failed" && fillJob.error_message && (
+                    <p className="mt-1 text-sm text-red-600">{fillJob.error_message}</p>
+                  )}
+                  {fillJob.failed > 0 && (
+                    <button
+                      type="button"
+                      className="mt-2 text-sm font-semibold text-warm-coral hover:underline"
+                      onClick={() => void openFailedWords()}
+                    >
+                      View failed words ({fillJob.failed.toLocaleString()})
+                    </button>
+                  )}
+                </div>
+                {jobActive && (
+                  <button
+                    type="button"
+                    className="warm-btn warm-btn-secondary shrink-0 text-sm"
+                    onClick={() => void handleCancelDefinitionFill()}
+                  >
+                    Cancel
+                  </button>
+                )}
+              </div>
+
+              {fillJob.total > 0 && (
+                <div className="mt-4">
+                  <div className="mb-2 flex items-center justify-between gap-3 text-sm">
+                    <span className="font-semibold text-warm-brown">
+                      {jobActive && fillJob.processed === 0
+                        ? "Starting…"
+                        : `${Math.min(100, Math.round((fillJob.processed / fillJob.total) * 100))}%`}
+                    </span>
+                    {jobActive && (
+                      <span className="text-warm-brown-soft">
+                        {fillJob.processed === 0
+                          ? "Looking up English definitions…"
+                          : `${(fillJob.total - fillJob.processed).toLocaleString()} left`}
+                      </span>
+                    )}
+                  </div>
+                  <div
+                    className="h-3 overflow-hidden rounded-full bg-orange-100"
+                    role="progressbar"
+                    aria-valuemin={0}
+                    aria-valuemax={fillJob.total}
+                    aria-valuenow={fillJob.processed}
+                    aria-label="Book definition fill progress"
+                  >
+                    {jobActive && fillJob.processed === 0 ? (
+                      <div className="book-fill-progress-indeterminate h-full w-1/3 rounded-full bg-warm-coral" />
+                    ) : (
+                      <div
+                        className="h-full rounded-full bg-warm-coral transition-all duration-500 ease-out"
+                        style={{
+                          width: `${Math.min(100, (fillJob.processed / fillJob.total) * 100)}%`,
+                        }}
+                      />
+                    )}
+                  </div>
+                </div>
+              )}
+            </section>
+          )}
+
+        {!loading && hasConfirmedBooks && definitionsSummary?.missing_en_count === 0 && (
+          <p className="text-sm text-warm-brown-soft">
+            All confirmed book words have English definitions.
+            {definitionsSummary.missing_zh_count > 0 && (
+              <>
+                {" "}
+                Chinese glosses ({definitionsSummary.missing_zh_count.toLocaleString()}) fill when
+                kids practice.
+              </>
+            )}
+          </p>
+        )}
 
         <section className="warm-card p-4">
           <ol className="flex flex-wrap gap-4 text-sm">
@@ -496,6 +848,20 @@ export default function BooksPage() {
               </p>
             )}
 
+            <div className="mt-4">
+              <button
+                type="button"
+                className="warm-btn warm-btn-secondary text-sm"
+                onClick={() => void openSuspiciousScan()}
+              >
+                Find suspicious words
+              </button>
+              <p className="mt-1 text-xs text-warm-muted">
+                Scan for typos, HTML fragments, and very short tokens — then hide the ones you
+                don&apos;t want in the study set.
+              </p>
+            </div>
+
             {selected.status === "preview" && (
               <div className="mt-6 rounded-2xl border border-amber-200 bg-amber-50/80 p-4">
                 <h3 className="text-sm font-bold text-amber-900">Confirm study set</h3>
@@ -626,6 +992,227 @@ export default function BooksPage() {
               )}
             </div>
           </section>
+        )}
+
+        {failedOpen && fillJob && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+            <div
+              className="warm-card flex max-h-[85vh] w-full max-w-2xl flex-col p-6"
+              role="dialog"
+              aria-labelledby="failed-words-title"
+            >
+              <div className="flex items-start justify-between gap-4">
+                <div>
+                  <h2 id="failed-words-title" className="text-xl font-extrabold text-warm-brown">
+                    Failed dictionary lookups
+                  </h2>
+                  <p className="mt-1 text-sm text-warm-brown-soft">
+                    {failedFallbackAll
+                      ? "Showing all words still missing English definitions (this job started before per-word failure tracking)."
+                      : "These words still have no English definition after the dictionary API. They may be typos, rare names, or junk from the book file. Hiding removes them from the study set."}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  className="text-sm font-semibold text-warm-muted"
+                  onClick={() => setFailedOpen(false)}
+                >
+                  Close
+                </button>
+              </div>
+
+              {failedLoading ? (
+                <p className="mt-6 text-sm text-warm-brown-soft">Loading…</p>
+              ) : failedRows.length === 0 ? (
+                <p className="mt-6 text-sm text-warm-brown-soft">
+                  No failed words recorded for this job yet.
+                </p>
+              ) : (
+                <>
+                  <div className="mt-4 flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      className="warm-btn warm-btn-primary text-sm"
+                      disabled={failedHiding || failedSelected.size === 0}
+                      onClick={() => void handleBulkHideFailed(true)}
+                    >
+                      {failedHiding ? "Updating…" : `Hide selected (${failedSelected.size})`}
+                    </button>
+                    <button
+                      type="button"
+                      className="warm-btn warm-btn-secondary text-sm"
+                      disabled={failedHiding}
+                      onClick={() =>
+                        setFailedSelected(
+                          new Set(failedRows.filter((row) => !row.is_hidden).map((row) => row.id)),
+                        )
+                      }
+                    >
+                      Select all visible
+                    </button>
+                  </div>
+                  <div className="mt-4 min-h-0 flex-1 overflow-y-auto rounded-2xl border border-orange-100">
+                    <table className="w-full text-left text-sm">
+                      <thead className="sticky top-0 bg-orange-50/95 text-warm-brown">
+                        <tr>
+                          <th className="px-3 py-2 font-bold"> </th>
+                          <th className="px-3 py-2 font-bold">Word</th>
+                          <th className="px-3 py-2 font-bold">Book</th>
+                          <th className="px-3 py-2 font-bold">Freq</th>
+                          <th className="px-3 py-2 font-bold"> </th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-orange-50">
+                        {failedRows.map((row) => (
+                          <tr key={row.id} className={row.is_hidden ? "opacity-60" : undefined}>
+                            <td className="px-3 py-2">
+                              {!row.is_hidden && (
+                                <input
+                                  type="checkbox"
+                                  checked={failedSelected.has(row.id)}
+                                  onChange={() => toggleFailedSelection(row.id)}
+                                  aria-label={`Select ${row.lemma}`}
+                                />
+                              )}
+                            </td>
+                            <td className="px-3 py-2 font-semibold text-warm-brown">{row.lemma}</td>
+                            <td className="px-3 py-2 text-warm-brown-soft">
+                              {row.book_title}
+                              {row.in_study_set ? " · study set" : ""}
+                              {row.is_hidden ? " · hidden" : ""}
+                            </td>
+                            <td className="px-3 py-2">{row.frequency}</td>
+                            <td className="px-3 py-2">
+                              {row.is_hidden ? (
+                                <button
+                                  type="button"
+                                  className="text-xs font-semibold text-warm-muted hover:text-warm-brown"
+                                  disabled={failedHiding}
+                                  onClick={() => void handleBulkHideFailed(false, [row.id])}
+                                >
+                                  Unhide
+                                </button>
+                              ) : null}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+        )}
+
+        {suspiciousOpen && selected && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+            <div
+              className="warm-card flex max-h-[85vh] w-full max-w-2xl flex-col p-6"
+              role="dialog"
+              aria-labelledby="suspicious-words-title"
+            >
+              <div className="flex items-start justify-between gap-4">
+                <div>
+                  <h2 id="suspicious-words-title" className="text-xl font-extrabold text-warm-brown">
+                    Suspicious words
+                  </h2>
+                  <p className="mt-1 text-sm text-warm-brown-soft">
+                    Review words that look like typos or HTML junk in &ldquo;{selected.title}&rdquo;.
+                    Hiding removes them from the study set.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  className="text-sm font-semibold text-warm-muted"
+                  onClick={() => setSuspiciousOpen(false)}
+                >
+                  Close
+                </button>
+              </div>
+
+              {suspiciousLoading ? (
+                <p className="mt-6 text-sm text-warm-brown-soft">Scanning…</p>
+              ) : suspiciousRows.length === 0 ? (
+                <p className="mt-6 text-sm text-warm-brown-soft">No suspicious words found.</p>
+              ) : (
+                <>
+                  <div className="mt-4 flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      className="warm-btn warm-btn-primary text-sm"
+                      disabled={suspiciousHiding || suspiciousSelected.size === 0}
+                      onClick={() => void handleBulkHideSuspicious(true)}
+                    >
+                      {suspiciousHiding ? "Updating…" : `Hide selected (${suspiciousSelected.size})`}
+                    </button>
+                    <button
+                      type="button"
+                      className="warm-btn warm-btn-secondary text-sm"
+                      disabled={suspiciousHiding}
+                      onClick={() =>
+                        setSuspiciousSelected(
+                          new Set(
+                            suspiciousRows.filter((row) => !row.is_hidden).map((row) => row.id),
+                          ),
+                        )
+                      }
+                    >
+                      Select all visible
+                    </button>
+                  </div>
+                  <div className="mt-4 min-h-0 flex-1 overflow-y-auto rounded-2xl border border-orange-100">
+                    <table className="w-full text-left text-sm">
+                      <thead className="sticky top-0 bg-orange-50/95 text-warm-brown">
+                        <tr>
+                          <th className="px-3 py-2 font-bold"> </th>
+                          <th className="px-3 py-2 font-bold">Word</th>
+                          <th className="px-3 py-2 font-bold">Reason</th>
+                          <th className="px-3 py-2 font-bold">Freq</th>
+                          <th className="px-3 py-2 font-bold"> </th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-orange-50">
+                        {suspiciousRows.map((row) => (
+                          <tr key={row.id} className={row.is_hidden ? "opacity-60" : undefined}>
+                            <td className="px-3 py-2">
+                              {!row.is_hidden && (
+                                <input
+                                  type="checkbox"
+                                  checked={suspiciousSelected.has(row.id)}
+                                  onChange={() => toggleSuspiciousSelection(row.id)}
+                                  aria-label={`Select ${row.lemma}`}
+                                />
+                              )}
+                            </td>
+                            <td className="px-3 py-2 font-semibold text-warm-brown">{row.lemma}</td>
+                            <td className="px-3 py-2 text-warm-brown-soft">
+                              {suspiciousReasonLabel(row.reason)}
+                              {row.in_study_set ? " · study set" : ""}
+                              {row.is_hidden ? " · hidden" : ""}
+                            </td>
+                            <td className="px-3 py-2">{row.frequency}</td>
+                            <td className="px-3 py-2">
+                              {row.is_hidden ? (
+                                <button
+                                  type="button"
+                                  className="text-xs font-semibold text-warm-muted hover:text-warm-brown"
+                                  disabled={suspiciousHiding}
+                                  onClick={() => void handleBulkHideSuspicious(false, [row.id])}
+                                >
+                                  Unhide
+                                </button>
+                              ) : null}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
         )}
       </main>
     </PageShell>

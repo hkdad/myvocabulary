@@ -16,6 +16,7 @@ class Settings(BaseSettings):
     refresh_token_expire_days_learner: int = 30
     refresh_token_expire_days_parent: int = 7
     audio_dir: Path = Path("./data/audio")
+    books_dir: Path = Path("../data/books")
     dictionary_api_url: str = "https://api.dictionaryapi.dev/api/v2/entries/en"
     dictionary_fallback_api_url: str = "https://api.suvankar.cc/dictionaryapi/v1/definitions/en"
     tts_voice: str = "en-US-JennyNeural"

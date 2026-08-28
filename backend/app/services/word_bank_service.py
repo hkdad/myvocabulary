@@ -2,28 +2,43 @@
 
 from __future__ import annotations
 
+import asyncio
 import csv
 import io
 import re
 from datetime import UTC, datetime
 
 from fastapi import HTTPException, UploadFile, status
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.database import AsyncSessionLocal
+from app.models.definition_fill_job import DefinitionFillJob
 from app.models.dictation import DictationSession
 from app.models.dictionary import DictionaryEntry
 from app.models.learner import Learner
 from app.models.srs import SrsCard
 from app.models.user import User
 from app.models.word_list import WordList, WordListAssignment, WordListItem, WordListItemCategory
+from app.services.definition_fill_utils import (
+    fill_job_error_message_from_exception,
+    sanitize_fill_job_error_message,
+)
 from app.services import dictionary_service, loop_engine
-from app.services.dictionary_service import normalize_word
+from app.services.dictionary_service import (
+    fill_placeholder_definition,
+    is_placeholder_definition,
+    normalize_word,
+)
 
 BANK_LIST_NAME = "Family word bank"
 
 PLACEHOLDER_DEFINITION = loop_engine.PLACEHOLDER_DEFINITION
+
+ACTIVE_JOB_STATUSES = ("queued", "running")
+FILL_PER_WORD_TIMEOUT = 8.0
+FILL_COMMIT_BATCH = 10
 
 REQUIRED_COLUMNS = ("word", "level", "category")
 LEVEL_MAX_LENGTH = 32
@@ -51,6 +66,199 @@ COLUMN_ALIASES: dict[str, tuple[str, ...]] = {
 
 MAX_IMPORT_BYTES = 5 * 1024 * 1024
 MAX_IMPORT_ROWS = 10_000
+
+
+def _placeholder_entry_filter():
+    return or_(
+        DictionaryEntry.source == "placeholder",
+        DictionaryEntry.definition.like("Definition pending%"),
+    )
+
+
+async def count_placeholder_entries(db: AsyncSession, parent_id: int) -> int:
+    bank = await loop_engine.get_family_bank(db, parent_id)
+    if bank is None:
+        return 0
+    result = await db.execute(
+        select(func.count(WordListItem.id))
+        .join(DictionaryEntry, WordListItem.dictionary_entry_id == DictionaryEntry.id)
+        .where(WordListItem.word_list_id == bank.id, _placeholder_entry_filter())
+    )
+    return int(result.scalar_one())
+
+
+async def _list_placeholder_entry_ids(db: AsyncSession, bank_id: int) -> list[int]:
+    result = await db.execute(
+        select(DictionaryEntry.id)
+        .join(WordListItem, WordListItem.dictionary_entry_id == DictionaryEntry.id)
+        .where(WordListItem.word_list_id == bank_id, _placeholder_entry_filter())
+        .order_by(WordListItem.sort_order, WordListItem.id)
+    )
+    return list(result.scalars().all())
+
+
+def job_to_dict(job: DefinitionFillJob) -> dict:
+    return {
+        "id": job.id,
+        "status": job.status,
+        "total": job.total,
+        "processed": job.processed,
+        "filled": job.filled,
+        "failed": job.failed,
+        "error_message": sanitize_fill_job_error_message(job.error_message),
+        "started_at": job.started_at.isoformat() if job.started_at else None,
+        "finished_at": job.finished_at.isoformat() if job.finished_at else None,
+    }
+
+
+async def get_current_definition_fill_job(
+    db: AsyncSession, parent_id: int
+) -> DefinitionFillJob | None:
+    result = await db.execute(
+        select(DefinitionFillJob)
+        .where(
+            DefinitionFillJob.parent_id == parent_id,
+            DefinitionFillJob.scope == "bank",
+        )
+        .order_by(DefinitionFillJob.id.desc())
+        .limit(1)
+    )
+    return result.scalar_one_or_none()
+
+
+async def start_definition_fill_job(db: AsyncSession, parent_id: int) -> dict:
+    bank = await loop_engine.get_family_bank(db, parent_id)
+    if bank is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "BANK_NOT_FOUND", "message": "No family word bank found"},
+        )
+
+    active = await db.execute(
+        select(DefinitionFillJob).where(
+            DefinitionFillJob.parent_id == parent_id,
+            DefinitionFillJob.scope == "bank",
+            DefinitionFillJob.status.in_(ACTIVE_JOB_STATUSES),
+        )
+    )
+    if active.scalar_one_or_none() is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "JOB_ALREADY_RUNNING",
+                "message": "A definition fill job is already in progress",
+            },
+        )
+
+    total = await count_placeholder_entries(db, parent_id)
+    if total == 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "NO_PLACEHOLDERS",
+                "message": "All words already have definitions",
+            },
+        )
+
+    job = DefinitionFillJob(
+        parent_id=parent_id,
+        scope="bank",
+        bank_id=bank.id,
+        status="queued",
+        total=total,
+    )
+    db.add(job)
+    await db.commit()
+    await db.refresh(job)
+
+    asyncio.create_task(run_definition_fill_job(job.id))
+    return job_to_dict(job)
+
+
+async def cancel_definition_fill_job(db: AsyncSession, parent_id: int, job_id: int) -> dict:
+    job = await db.get(DefinitionFillJob, job_id)
+    if job is None or job.parent_id != parent_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
+    if job.status not in ACTIVE_JOB_STATUSES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Only queued or running jobs can be cancelled",
+        )
+    job.status = "cancelled"
+    job.finished_at = datetime.now(UTC)
+    await db.commit()
+    await db.refresh(job)
+    return job_to_dict(job)
+
+
+async def run_definition_fill_job(job_id: int) -> None:
+    async with AsyncSessionLocal() as db:
+        await execute_definition_fill_job(db, job_id)
+
+
+async def execute_definition_fill_job(db: AsyncSession, job_id: int) -> None:
+    try:
+        job = await db.get(DefinitionFillJob, job_id)
+        if job is None:
+            return
+        job.status = "running"
+        job.started_at = datetime.now(UTC)
+        await db.commit()
+
+        entry_ids = await _list_placeholder_entry_ids(db, job.bank_id)
+        job.total = len(entry_ids)
+        await db.commit()
+
+        processed = filled = failed = 0
+        for entry_id in entry_ids:
+            job = await db.get(DefinitionFillJob, job_id)
+            if job is None or job.status == "cancelled":
+                if job is not None:
+                    job.finished_at = datetime.now(UTC)
+                    await db.commit()
+                return
+
+            entry = await db.get(DictionaryEntry, entry_id)
+            if entry is None or not is_placeholder_definition(entry):
+                processed += 1
+                continue
+
+            try:
+                await asyncio.wait_for(
+                    fill_placeholder_definition(db, entry),
+                    timeout=FILL_PER_WORD_TIMEOUT,
+                )
+                await db.commit()
+                if not is_placeholder_definition(entry):
+                    filled += 1
+                else:
+                    failed += 1
+            except (TimeoutError, Exception):
+                failed += 1
+
+            processed += 1
+            job.processed = processed
+            job.filled = filled
+            job.failed = failed
+            await db.commit()
+
+        job = await db.get(DefinitionFillJob, job_id)
+        if job is None:
+            return
+        job.status = "completed"
+        job.processed = processed
+        job.filled = filled
+        job.failed = failed
+        job.finished_at = datetime.now(UTC)
+        await db.commit()
+    except Exception as exc:
+        await db.rollback()
+        job = await db.get(DefinitionFillJob, job_id)
+        if job is not None:
+            job.status = "failed"
+            job.error_message = fill_job_error_message_from_exception(exc)
+            job.finished_at = datetime.now(UTC)
+            await db.commit()
 
 
 def _resolve_column_map(fieldnames: list[str]) -> dict[str, str]:
@@ -380,6 +588,7 @@ async def get_bank_summary(db: AsyncSession, parent_id: int) -> dict:
             "bank_id": None,
             "name": BANK_LIST_NAME,
             "total_items": 0,
+            "placeholder_count": 0,
             "by_level": {},
             "by_category": {},
         }
@@ -414,6 +623,7 @@ async def get_bank_summary(db: AsyncSession, parent_id: int) -> dict:
         "bank_id": bank.id,
         "name": bank.name,
         "total_items": total,
+        "placeholder_count": await count_placeholder_entries(db, parent_id),
         "by_level": by_level,
         "by_category": by_category,
     }
@@ -428,6 +638,7 @@ async def list_bank_items(
     query: str | None = None,
     page: int = 1,
     page_size: int = 50,
+    placeholders_only: bool = False,
 ) -> dict:
     bank = await loop_engine.get_family_bank(db, parent_id)
     if bank is None:
@@ -460,6 +671,8 @@ async def list_bank_items(
         filters.append(
             (DictionaryEntry.word.ilike(term)) | (DictionaryEntry.definition.ilike(term))
         )
+    if placeholders_only:
+        filters.append(_placeholder_entry_filter())
 
     base_filters = filters.copy()
     count_result = await db.execute(

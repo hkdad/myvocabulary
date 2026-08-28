@@ -72,3 +72,56 @@ class BookAssignRequest(BaseModel):
 
 class BookLemmaHideRequest(BaseModel):
     hidden: bool = True
+
+
+class SuspiciousLemma(BaseModel):
+    id: int
+    lemma: str
+    frequency: int
+    rank: int
+    in_study_set: bool
+    is_hidden: bool
+    reason: str
+
+
+class SuspiciousLemmaListResponse(BaseModel):
+    items: list[SuspiciousLemma]
+    total: int
+
+
+class BookLemmaBulkHideRequest(BaseModel):
+    lemma_ids: list[int] = Field(min_length=1)
+    hidden: bool = True
+
+
+class BookDefinitionsSummary(BaseModel):
+    needs_refresh_count: int
+    missing_en_count: int
+    missing_zh_count: int
+
+
+class DefinitionFillJobResponse(BaseModel):
+    id: int
+    status: str
+    total: int
+    processed: int
+    filled: int
+    failed: int
+    error_message: str | None = None
+    started_at: str | None = None
+    finished_at: str | None = None
+
+
+class PlaceholderLemma(BaseModel):
+    id: int
+    book_id: int
+    book_title: str
+    lemma: str
+    frequency: int
+    in_study_set: bool
+    is_hidden: bool
+
+
+class PlaceholderLemmaListResponse(BaseModel):
+    items: list[PlaceholderLemma]
+    total: int

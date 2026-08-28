@@ -368,12 +368,16 @@ def _apply_definition_payload(entry: DictionaryEntry, payload: dict, *, lookup_w
         entry.word = resolved
 
 
-async def fill_placeholder_definition(db: AsyncSession, entry: DictionaryEntry) -> DictionaryEntry:
+async def fill_placeholder_definition(
+    db: AsyncSession, entry: DictionaryEntry, *, api_only: bool = False
+) -> DictionaryEntry:
     """Fill a placeholder gloss before a card is shown. Never raises."""
     if not is_placeholder_definition(entry):
         return entry
     for candidate in _definition_lookup_variants(entry.word):
-        payload = await generate_kid_definition(candidate)
+        payload = None
+        if not api_only:
+            payload = await generate_kid_definition(candidate)
         if payload is None:
             try:
                 payload = await fetch_from_api(candidate)

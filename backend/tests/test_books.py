@@ -6,6 +6,7 @@ import pytest
 from httpx import AsyncClient
 from sqlalchemy import select
 
+from app.models.book import Book, BookLemma
 from app.models.dictionary import DictionaryEntry
 from app.models.learner import Learner
 from app.models.srs import SrsCard, SrsReviewLog
@@ -284,6 +285,8 @@ async def test_mid_day_unassign_resets_source_kind(client: AsyncClient, db_sessi
 
 @pytest.mark.asyncio
 async def test_delete_preview_book(client: AsyncClient) -> None:
+    from app.config import get_settings
+
     token = await _login(client, "parent", "parent123")
     preview = await client.post(
         "/api/v1/books/preview",
@@ -291,11 +294,15 @@ async def test_delete_preview_book(client: AsyncClient) -> None:
         files={"file": ("fox.txt", io.BytesIO(FOX_STORY.encode()), "text/plain")},
     )
     book_id = preview.json()["id"]
+    stored = get_settings().books_dir / str(book_id) / "fox.txt"
+    assert stored.is_file()
     deleted = await client.delete(
         f"/api/v1/books/{book_id}",
         headers={"Authorization": f"Bearer {token}"},
     )
     assert deleted.status_code == 204
+    assert not stored.exists()
+    assert not get_settings().books_dir.joinpath(str(book_id)).exists()
     missing = await client.get(
         f"/api/v1/books/{book_id}",
         headers={"Authorization": f"Bearer {token}"},
@@ -400,6 +407,61 @@ async def test_delete_confirmed_book(client: AsyncClient, db_session) -> None:
         headers={"Authorization": f"Bearer {token}"},
     )
     assert missing.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_delete_confirmed_book_with_practice_srs_cards(client: AsyncClient, db_session) -> None:
+    parent_token = await _login(client, "parent", "parent123")
+    learner = (
+        await db_session.execute(select(Learner).where(Learner.display_name == "Leo"))
+    ).scalar_one()
+    preview = await client.post(
+        "/api/v1/books/preview",
+        headers={"Authorization": f"Bearer {parent_token}"},
+        files={"file": ("fox.txt", io.BytesIO(FOX_STORY.encode()), "text/plain")},
+    )
+    book_id = preview.json()["id"]
+    confirm = await client.post(
+        f"/api/v1/books/{book_id}/confirm",
+        headers={"Authorization": f"Bearer {parent_token}"},
+        json={"coverage_target": 0.8, "title": "Fox Story"},
+    )
+    assert confirm.status_code == 200
+    book_list_id = confirm.json()["word_list_id"]
+    assign = await client.post(
+        f"/api/v1/books/{book_id}/assign",
+        headers={"Authorization": f"Bearer {parent_token}"},
+        json={"learner_id": learner.id},
+    )
+    assert assign.status_code == 200
+
+    leo_token = await _login(client, "leo", "leo")
+    with (
+        patch("app.services.dictionary_service.generate_kid_definition", return_value=None),
+        patch("app.services.dictionary_service.fetch_from_api", side_effect=Exception("offline")),
+    ):
+        mix = await client.get(
+            "/api/v1/loop/today",
+            headers={"Authorization": f"Bearer {leo_token}"},
+        )
+    assert mix.status_code == 200
+
+    linked_cards = (
+        await db_session.execute(
+            select(SrsCard).where(SrsCard.word_list_id == book_list_id, SrsCard.learner_id == learner.id)
+        )
+    ).scalars().all()
+    assert linked_cards, "expected SRS cards linked to the book word list"
+
+    deleted = await client.delete(
+        f"/api/v1/books/{book_id}",
+        headers={"Authorization": f"Bearer {parent_token}"},
+    )
+    assert deleted.status_code == 204
+
+    for card in linked_cards:
+        await db_session.refresh(card)
+        assert card.word_list_id is None
 
 
 @pytest.mark.asyncio
@@ -546,3 +608,112 @@ async def test_learner_words_overlap_shows_bank_level_and_book(
         headers={"Authorization": f"Bearer {leo_token}"},
     )
     assert any(item["word"] == "fox" for item in by_book.json()["items"])
+
+
+@pytest.mark.asyncio
+async def test_suspicious_lemmas_endpoint(client: AsyncClient, db_session) -> None:
+    parent_token = await _login(client, "parent", "parent123")
+    preview = await client.post(
+        "/api/v1/books/preview",
+        headers={"Authorization": f"Bearer {parent_token}"},
+        files={"file": ("fox.txt", io.BytesIO(FOX_STORY.encode()), "text/plain")},
+    )
+    book_id = preview.json()["id"]
+    book = (await db_session.execute(select(Book).where(Book.id == book_id))).scalar_one()
+    db_session.add(
+        BookLemma(
+            book_id=book.id,
+            lemma="b",
+            frequency=2,
+            rank=999,
+            in_study_set=True,
+        )
+    )
+    db_session.add(
+        BookLemma(
+            book_id=book.id,
+            lemma="em",
+            frequency=1,
+            rank=1000,
+            in_study_set=False,
+        )
+    )
+    await db_session.commit()
+
+    response = await client.get(
+        f"/api/v1/books/{book_id}/suspicious-lemmas",
+        headers={"Authorization": f"Bearer {parent_token}"},
+    )
+    assert response.status_code == 200
+    by_lemma = {row["lemma"]: row for row in response.json()["items"]}
+    assert by_lemma["b"]["reason"] == "single_letter"
+    assert by_lemma["em"]["reason"] == "html_artifact"
+    assert "fox" not in by_lemma
+
+
+@pytest.mark.asyncio
+async def test_bulk_hide_suspicious_lemmas_on_confirmed_book(
+    client: AsyncClient, db_session
+) -> None:
+    parent_token = await _login(client, "parent", "parent123")
+    preview = await client.post(
+        "/api/v1/books/preview",
+        headers={"Authorization": f"Bearer {parent_token}"},
+        files={"file": ("fox.txt", io.BytesIO(FOX_STORY.encode()), "text/plain")},
+    )
+    book_id = preview.json()["id"]
+    confirm = await client.post(
+        f"/api/v1/books/{book_id}/confirm",
+        headers={"Authorization": f"Bearer {parent_token}"},
+        json={"coverage_target": 0.8, "title": "Fox Junk"},
+    )
+    assert confirm.status_code == 200
+    book_list_id = confirm.json()["word_list_id"]
+
+    junk_entry = DictionaryEntry(
+        word="b",
+        definition="Definition pending — added from family word bank.",
+        source="placeholder",
+        fetched_at=datetime.now(UTC),
+    )
+    db_session.add(junk_entry)
+    await db_session.flush()
+    junk_lemma = BookLemma(
+        book_id=book_id,
+        lemma="b",
+        frequency=2,
+        rank=999,
+        in_study_set=True,
+        dictionary_entry_id=junk_entry.id,
+    )
+    db_session.add(junk_lemma)
+    db_session.add(
+        WordListItem(
+            word_list_id=book_list_id,
+            dictionary_entry_id=junk_entry.id,
+            sort_order=999,
+        )
+    )
+    await db_session.commit()
+    await db_session.refresh(junk_lemma)
+
+    hide = await client.post(
+        f"/api/v1/books/{book_id}/lemmas/bulk-hide",
+        headers={"Authorization": f"Bearer {parent_token}"},
+        json={"lemma_ids": [junk_lemma.id], "hidden": True},
+    )
+    assert hide.status_code == 200
+
+    item = (
+        await db_session.execute(
+            select(WordListItem).where(
+                WordListItem.word_list_id == book_list_id,
+                WordListItem.dictionary_entry_id == junk_entry.id,
+            )
+        )
+    ).scalar_one_or_none()
+    assert item is None
+    refreshed = (
+        await db_session.execute(select(BookLemma).where(BookLemma.id == junk_lemma.id))
+    ).scalar_one()
+    assert refreshed.is_hidden is True
