@@ -73,8 +73,21 @@ export type WordBankSummary = {
   bank_id: number | null;
   name: string;
   total_items: number;
+  placeholder_count: number;
   by_level: Record<string, number>;
   by_category: Record<string, number>;
+};
+
+export type DefinitionFillJob = {
+  id: number;
+  status: string;
+  total: number;
+  processed: number;
+  filled: number;
+  failed: number;
+  error_message: string | null;
+  started_at: string | null;
+  finished_at: string | null;
 };
 
 export type WordBankImportResult = {
@@ -196,15 +209,41 @@ export async function getWordBankItems(params: {
   q?: string;
   page?: number;
   page_size?: number;
+  placeholders_only?: boolean;
 }): Promise<WordBankItemsPage> {
   const search = new URLSearchParams();
   if (params.level) search.set("level", params.level);
   if (params.category) search.set("category", params.category);
   if (params.q) search.set("q", params.q);
+  if (params.placeholders_only) search.set("placeholders_only", "true");
   search.set("page", String(params.page ?? 1));
   search.set("page_size", String(params.page_size ?? 50));
   const query = search.toString();
   return apiFetch<WordBankItemsPage>(`/word-bank/items?${query}`, {}, API_BASE_URL);
+}
+
+export async function startDefinitionFillJob(): Promise<DefinitionFillJob> {
+  return apiFetch<DefinitionFillJob>(
+    "/word-bank/fill-definitions",
+    { method: "POST" },
+    API_BASE_URL,
+  );
+}
+
+export async function getCurrentDefinitionFillJob(): Promise<DefinitionFillJob | null> {
+  return apiFetch<DefinitionFillJob | null>(
+    "/word-bank/fill-definitions/current",
+    {},
+    API_BASE_URL,
+  );
+}
+
+export async function cancelDefinitionFillJob(jobId: number): Promise<DefinitionFillJob> {
+  return apiFetch<DefinitionFillJob>(
+    `/word-bank/fill-definitions/${jobId}/cancel`,
+    { method: "POST" },
+    API_BASE_URL,
+  );
 }
 
 export type ThemePackQuest = {

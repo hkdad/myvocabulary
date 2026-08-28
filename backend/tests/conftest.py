@@ -14,6 +14,7 @@ from app.core.sm2 import DEFAULT_EASE_FACTOR
 from app.database import Base, get_db
 from app.main import app
 from app.models.book import Book, BookLemma  # noqa: F401
+from app.models.definition_fill_job import DefinitionFillJob  # noqa: F401
 from app.models.dictionary import DictionaryEntry
 from app.models.learner import Learner
 from app.models.srs import SrsCard

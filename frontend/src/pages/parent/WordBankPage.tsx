@@ -4,13 +4,20 @@ import { Link, useNavigate } from "react-router-dom";
 import {
   bankCategoriesFromSummary,
   bankLevelsFromSummary,
+  cancelDefinitionFillJob,
   deleteWordBank,
+  getCurrentDefinitionFillJob,
   getWordBankItems,
   getWordBankSummary,
+  startDefinitionFillJob,
+  type DefinitionFillJob,
   type WordBankItem,
   type WordBankSummary,
 } from "../../api/loop";
 import PageShell from "../../components/PageShell";
+import { isPlaceholderDefinition } from "../../lib/placeholderDefinition";
+
+const ACTIVE_JOB_STATUSES = new Set(["queued", "running"]);
 
 export default function WordBankPage() {
   const navigate = useNavigate();
@@ -23,22 +30,30 @@ export default function WordBankPage() {
   const [category, setCategory] = useState("");
   const [search, setSearch] = useState("");
   const [searchInput, setSearchInput] = useState("");
+  const [placeholdersOnly, setPlaceholdersOnly] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [itemsError, setItemsError] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const [fillJob, setFillJob] = useState<DefinitionFillJob | null>(null);
+  const [startingFill, setStartingFill] = useState(false);
 
   const pageSize = 50;
   const levelOptions = summary ? bankLevelsFromSummary(summary.by_level) : [];
   const categoryOptions = summary ? bankCategoriesFromSummary(summary.by_category) : [];
+  const jobActive = fillJob !== null && ACTIVE_JOB_STATUSES.has(fillJob.status);
 
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
     setItemsError(null);
     try {
-      const bankSummary = await getWordBankSummary();
+      const [bankSummary, currentJob] = await Promise.all([
+        getWordBankSummary(),
+        getCurrentDefinitionFillJob(),
+      ]);
       setSummary(bankSummary);
+      setFillJob(currentJob);
 
       try {
         const pageData = await getWordBankItems({
@@ -47,6 +62,7 @@ export default function WordBankPage() {
           q: search || undefined,
           page,
           page_size: pageSize,
+          placeholders_only: placeholdersOnly || undefined,
         });
         setItems(pageData.items);
         setTotal(pageData.total);
@@ -67,11 +83,28 @@ export default function WordBankPage() {
     } finally {
       setLoading(false);
     }
-  }, [category, level, page, search]);
+  }, [category, level, page, placeholdersOnly, search]);
 
   useEffect(() => {
     void load();
   }, [load]);
+
+  useEffect(() => {
+    if (!jobActive) {
+      return;
+    }
+    const timer = window.setInterval(() => {
+      void getCurrentDefinitionFillJob()
+        .then((job) => {
+          setFillJob(job);
+          if (job && !ACTIVE_JOB_STATUSES.has(job.status)) {
+            void load();
+          }
+        })
+        .catch(() => undefined);
+    }, 2000);
+    return () => window.clearInterval(timer);
+  }, [jobActive, load]);
 
   function handleSearchSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -84,7 +117,33 @@ export default function WordBankPage() {
     setCategory("");
     setSearch("");
     setSearchInput("");
+    setPlaceholdersOnly(false);
     setPage(1);
+  }
+
+  async function handleStartFill() {
+    setStartingFill(true);
+    setError(null);
+    try {
+      const job = await startDefinitionFillJob();
+      setFillJob(job);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not start definition fill");
+    } finally {
+      setStartingFill(false);
+    }
+  }
+
+  async function handleCancelFill() {
+    if (!fillJob) {
+      return;
+    }
+    try {
+      const job = await cancelDefinitionFillJob(fillJob.id);
+      setFillJob(job);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not cancel job");
+    }
   }
 
   async function handleDelete() {
@@ -119,10 +178,30 @@ export default function WordBankPage() {
             {summary && (
               <p className="mt-1 text-sm text-warm-brown-soft">
                 {summary.total_items.toLocaleString()} words uploaded
+                {summary.placeholder_count > 0 && (
+                  <>
+                    {" "}
+                    · {summary.placeholder_count.toLocaleString()} missing definitions
+                  </>
+                )}
               </p>
             )}
           </div>
           <div className="flex flex-wrap gap-2">
+            {summary && summary.placeholder_count > 0 && (
+              <button
+                type="button"
+                className="warm-btn warm-btn-primary text-sm"
+                disabled={startingFill || jobActive}
+                onClick={() => void handleStartFill()}
+              >
+                {startingFill
+                  ? "Starting…"
+                  : jobActive
+                    ? "Filling definitions…"
+                    : "Fill missing definitions"}
+              </button>
+            )}
             {summary && summary.total_items > 0 && (
               <button
                 type="button"
@@ -141,6 +220,41 @@ export default function WordBankPage() {
 
         {error && <p className="font-semibold text-red-600">{error}</p>}
         {itemsError && <p className="font-semibold text-red-600">{itemsError}</p>}
+
+        {fillJob && (jobActive || fillJob.status === "completed" || fillJob.status === "failed") && (
+          <section className="warm-card p-4">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <p className="text-sm font-bold text-warm-brown">Definition fill job</p>
+                <p className="mt-1 text-sm text-warm-brown-soft">
+                  {fillJob.filled.toLocaleString()} filled · {fillJob.failed.toLocaleString()}{" "}
+                  failed · {fillJob.processed.toLocaleString()} / {fillJob.total.toLocaleString()}{" "}
+                  processed
+                </p>
+                {fillJob.status === "failed" && fillJob.error_message && (
+                  <p className="mt-1 text-sm text-red-600">{fillJob.error_message}</p>
+                )}
+              </div>
+              {jobActive && (
+                <button
+                  type="button"
+                  className="warm-btn warm-btn-secondary text-sm"
+                  onClick={() => void handleCancelFill()}
+                >
+                  Cancel
+                </button>
+              )}
+            </div>
+            {fillJob.total > 0 && (
+              <div className="mt-3 h-2 overflow-hidden rounded-full bg-orange-100">
+                <div
+                  className="h-full rounded-full bg-warm-coral transition-all"
+                  style={{ width: `${Math.min(100, (fillJob.processed / fillJob.total) * 100)}%` }}
+                />
+              </div>
+            )}
+          </section>
+        )}
 
         {summary && summary.total_items > 0 && (
           <section className="warm-card p-4">
@@ -206,10 +320,21 @@ export default function WordBankPage() {
                 </option>
               ))}
             </select>
+            <label className="flex items-center gap-2 text-sm font-semibold text-warm-brown">
+              <input
+                type="checkbox"
+                checked={placeholdersOnly}
+                onChange={(event) => {
+                  setPage(1);
+                  setPlaceholdersOnly(event.target.checked);
+                }}
+              />
+              Missing definitions only
+            </label>
             <button type="submit" className="warm-btn warm-btn-primary text-sm">
               Search
             </button>
-            {(level || category || search) && (
+            {(level || category || search || placeholdersOnly) && (
               <button
                 type="button"
                 className="warm-btn warm-btn-secondary text-sm"
@@ -248,7 +373,11 @@ export default function WordBankPage() {
                   {items.map((item) => (
                     <tr key={item.id} className="text-warm-body">
                       <td className="px-4 py-3 font-semibold text-warm-brown">{item.word}</td>
-                      <td className="max-w-md px-4 py-3 text-warm-brown-soft">{item.definition}</td>
+                      <td className="max-w-md px-4 py-3 text-warm-brown-soft">
+                        {isPlaceholderDefinition(item.definition)
+                          ? "Definition pending…"
+                          : item.definition}
+                      </td>
                       <td className="px-4 py-3">{item.level ?? "—"}</td>
                       <td className="px-4 py-3">{item.categories.join(" · ")}</td>
                     </tr>

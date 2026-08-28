@@ -9,10 +9,17 @@ from __future__ import annotations
 
 import html
 import io
+import logging
 import re
 import xml.etree.ElementTree as ET
 import zipfile
 from dataclasses import dataclass, field
+
+import ebooklib
+from ebooklib import epub
+from lxml import etree
+
+logger = logging.getLogger(__name__)
 
 # NLTK English stopwords (same set the Sherlock research used).
 FUNCTION_WORDS: frozenset[str] = frozenset(
@@ -207,6 +214,64 @@ DEFAULT_COVERAGE_TARGET = 0.80
 TOKEN_RE = re.compile(r"[A-Za-z]+(?:'[A-Za-z]+)?")
 HTML_TAG_RE = re.compile(r"<[^>]+>")
 SENTENCE_END_RE = re.compile(r"[.!?]")
+_LINE_BREAK_HYPHEN_RE = re.compile(r"(\w)-\s*\n\s*(\w)")
+_SOFT_HYPHEN_CHARS = ("\u00ad", "\u200b")
+_HTML_PARSER = etree.HTMLParser()
+
+MIN_CONTENT_LEMMA_LENGTH = 3
+
+HTML_ARTIFACTS: frozenset[str] = frozenset(
+    {
+        "em",
+        "br",
+        "li",
+        "td",
+        "th",
+        "ul",
+        "ol",
+        "hr",
+        "div",
+        "span",
+        "img",
+        "src",
+        "href",
+        "alt",
+        "rel",
+        "var",
+        "sub",
+        "sup",
+        "nav",
+        "svg",
+        "xml",
+        "meta",
+        "head",
+        "body",
+        "html",
+        "pre",
+        "code",
+    }
+)
+
+BROKEN_LEMMA_RE = re.compile(r"(?:consciou|familiou|iou)$")
+
+
+def suspicious_lemma_reason(lemma: str) -> str | None:
+    """Return a reason code when a book lemma looks like junk, else None."""
+    normalized = lemma.strip().lower()
+    if not normalized:
+        return "non_alpha"
+    if not normalized.isalpha():
+        return "non_alpha"
+    if len(normalized) == 1:
+        return "single_letter"
+    if normalized in HTML_ARTIFACTS:
+        return "html_artifact"
+    if len(normalized) < MIN_CONTENT_LEMMA_LENGTH:
+        return "too_short"
+    if BROKEN_LEMMA_RE.search(normalized):
+        return "broken_lemma"
+    return None
+
 
 _IRREGULAR: dict[str, str] = {
     "am": "be",
@@ -289,6 +354,16 @@ class BookAnalysis:
         return apply_coverage_cap(self.lemmas, coverage_target)
 
 
+_ING_LEMMA_EXCEPTIONS: frozenset[str] = frozenset(
+    {
+        "something",
+        "anything",
+        "everything",
+        "nothing",
+    }
+)
+
+
 def fallback_lemmatize(token: str) -> str:
     lower = token.lower()
     if lower in _IRREGULAR:
@@ -301,6 +376,8 @@ def fallback_lemmatize(token: str) -> str:
     ):
         return lower[:-2]
     if lower.endswith("ing") and len(lower) > 5:
+        if lower in _ING_LEMMA_EXCEPTIONS:
+            return lower
         stem = lower[:-3]
         if len(stem) > 2 and stem[-1] == stem[-2] and stem[-1] not in "aeiou":
             stem = stem[:-1]
@@ -435,6 +512,9 @@ def analyze_text(text: str, *, coverage_target: float = DEFAULT_COVERAGE_TARGET)
         if lemma in FUNCTION_WORDS:
             function_skipped += 1
             continue
+        if len(lemma) < MIN_CONTENT_LEMMA_LENGTH:
+            function_skipped += 1
+            continue
         if is_proper:
             proper_skipped += 1
             continue
@@ -485,7 +565,23 @@ def _safe_zip_member(name: str) -> bool:
     return name.lower().endswith((".xhtml", ".html", ".htm"))
 
 
-def extract_epub(data: bytes) -> str:
+def normalize_book_text(text: str) -> str:
+    for char in _SOFT_HYPHEN_CHARS:
+        text = text.replace(char, "")
+    text = _LINE_BREAK_HYPHEN_RE.sub(r"\1\2", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _html_bytes_to_text(raw: bytes) -> str:
+    try:
+        root = etree.fromstring(raw, parser=_HTML_PARSER)
+    except etree.XMLSyntaxError:
+        return html.unescape(HTML_TAG_RE.sub(" ", extract_txt(raw)))
+    text = etree.ElementTree(root).xpath("string()")
+    return html.unescape(text)
+
+
+def _extract_epub_regex_fallback(data: bytes) -> str:
     chunks: list[str] = []
     with zipfile.ZipFile(io.BytesIO(data)) as archive:
         names = [name for name in archive.namelist() if _safe_zip_member(name)]
@@ -497,15 +593,47 @@ def extract_epub(data: bytes) -> str:
     return "\n".join(chunks)
 
 
+def extract_epub(data: bytes) -> str:
+    try:
+        book = epub.read_epub(io.BytesIO(data), options={"ignore_ncx": True})
+    except Exception as exc:
+        logger.warning("ebooklib.read_epub failed, falling back to regex extraction: %s", exc)
+        return _extract_epub_regex_fallback(data)
+
+    chunks: list[str] = []
+    for item_id, linear in book.spine:
+        if linear != "yes":
+            continue
+        item = book.get_item_with_id(item_id)
+        if item is None:
+            continue
+        if item.get_type() == ebooklib.ITEM_NAVIGATION:
+            continue
+        content = item.get_content()
+        if not content:
+            continue
+        text = _html_bytes_to_text(content)
+        if text.strip():
+            chunks.append(text)
+
+    if not chunks:
+        logger.warning("ebooklib spine extraction returned no text, falling back to regex")
+        return _extract_epub_regex_fallback(data)
+
+    return "\n\n".join(chunks)
+
+
 def extract_book_text(*, filename: str, data: bytes) -> str:
     lower = filename.lower()
     if lower.endswith(".pdf"):
         raise ValueError("PDF upload is not supported yet — use txt or epub.")
     if lower.endswith(".epub"):
-        return extract_epub(data)
-    if lower.endswith(".txt"):
-        return extract_txt(data)
-    raise ValueError("Unsupported file type. Upload a .txt or .epub file.")
+        text = extract_epub(data)
+    elif lower.endswith(".txt"):
+        text = extract_txt(data)
+    else:
+        raise ValueError("Unsupported file type. Upload a .txt or .epub file.")
+    return normalize_book_text(text)
 
 
 def title_from_filename(filename: str) -> str:

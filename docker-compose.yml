@@ -11,6 +11,7 @@ services:
     environment:
       DATABASE_URL: sqlite+aiosqlite:////app/data/myvocabulary.db
       AUDIO_DIR: /app/data/audio
+      BOOKS_DIR: /app/data/books
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]

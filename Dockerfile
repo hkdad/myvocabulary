@@ -32,6 +32,7 @@ COPY --from=frontend-build /app/frontend/dist ./static
 ENV PATH="/app/.venv/bin:$PATH"
 ENV DATABASE_URL=sqlite+aiosqlite:////app/data/myvocabulary.db
 ENV AUDIO_DIR=/app/data/audio
+ENV BOOKS_DIR=/app/data/books
 
 EXPOSE 8000
 

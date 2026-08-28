@@ -19,8 +19,21 @@ class WordBankSummaryResponse(BaseModel):
     bank_id: int | None
     name: str
     total_items: int
+    placeholder_count: int = 0
     by_level: dict[str, int]
     by_category: dict[str, int]
+
+
+class DefinitionFillJobResponse(BaseModel):
+    id: int
+    status: str
+    total: int
+    processed: int
+    filled: int
+    failed: int
+    error_message: str | None = None
+    started_at: str | None = None
+    finished_at: str | None = None
 
 
 class WordBankDeleteResponse(BaseModel):

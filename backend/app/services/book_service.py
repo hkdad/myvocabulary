@@ -2,16 +2,24 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import math
+import shutil
 from datetime import UTC, datetime
+from pathlib import Path
 
 from fastapi import HTTPException, UploadFile, status
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, not_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.config import get_settings
+
+from app.database import AsyncSessionLocal
 from app.models.book import Book, BookLemma
+from app.models.definition_fill_job import DefinitionFillJob
+from app.models.dictation import DictationSession
 from app.models.dictionary import DictionaryEntry
 from app.models.learner import Learner
 from app.models.srs import SrsCard
@@ -22,11 +30,49 @@ from app.services.book_analysis import (
     analyze_text,
     extract_book_text,
     extract_book_title,
+    suspicious_lemma_reason,
 )
-from app.services.dictionary_service import is_placeholder_definition, normalize_word
+from app.services.dictionary_service import (
+    fill_placeholder_definition,
+    is_placeholder_definition,
+    normalize_word,
+)
+from app.services.definition_fill_utils import fill_job_error_message_from_exception
+from app.services.word_bank_service import job_to_dict
 
 MAX_BOOK_BYTES = 10 * 1024 * 1024
 PLACEHOLDER_DEFINITION = loop_engine.PLACEHOLDER_DEFINITION
+
+BOOK_FILL_SCOPE = "books"
+ACTIVE_JOB_STATUSES = ("queued", "running")
+BOOK_FILL_PER_WORD_TIMEOUT = 12.0
+BOOK_FILL_COMMIT_BATCH = 10
+MAX_JOB_FAILED_WORDS = 500
+
+
+def _safe_upload_basename(filename: str) -> str:
+    stem = Path(filename).name.strip()
+    if not stem or stem in {".", ".."}:
+        return "book.txt"
+    return stem[:255]
+
+
+def _book_storage_dir(book_id: int) -> Path:
+    path = get_settings().books_dir / str(book_id)
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _save_book_upload(book_id: int, filename: str, data: bytes) -> Path:
+    path = _book_storage_dir(book_id) / _safe_upload_basename(filename)
+    path.write_bytes(data)
+    return path
+
+
+def _delete_book_upload(book_id: int) -> None:
+    root = get_settings().books_dir / str(book_id)
+    if root.exists():
+        shutil.rmtree(root)
 
 
 def _curve_dict(raw: str | dict) -> dict[str, int]:
@@ -140,6 +186,7 @@ async def preview_upload(db: AsyncSession, *, parent_id: int, upload: UploadFile
     )
     db.add(book)
     await db.flush()
+    _save_book_upload(book.id, filename, data)
 
     lemmas_to_match = [item.lemma for item in analysis.lemmas]
     bank_words = await _family_bank_words(db, parent_id)
@@ -266,11 +313,26 @@ async def delete_book(db: AsyncSession, *, parent_id: int, book_id: int) -> None
             delete(WordListAssignment).where(WordListAssignment.word_list_id == list_id)
         )
         await db.execute(delete(WordListItem).where(WordListItem.word_list_id == list_id))
+
+        cards_result = await db.execute(select(SrsCard).where(SrsCard.word_list_id == list_id))
+        for card in cards_result.scalars().all():
+            card.word_list_id = None
+
+        sessions_result = await db.execute(
+            select(DictationSession).where(DictationSession.word_list_id == list_id)
+        )
+        for session in sessions_result.scalars().all():
+            session.word_list_id = None
+
+        book.word_list_id = None
+        await db.flush()
+
         word_list = await db.get(WordList, list_id)
         if word_list is not None:
             await db.delete(word_list)
     await db.delete(book)
     await db.commit()
+    _delete_book_upload(book_id)
 
 
 async def delete_preview(db: AsyncSession, *, parent_id: int, book_id: int) -> None:
@@ -311,6 +373,76 @@ async def hide_lemma(
                     sort_order=lemma.rank,
                 )
             )
+    await db.commit()
+    return await _get_book_for_parent(db, book.id, parent_id)
+
+
+async def list_suspicious_lemmas(
+    db: AsyncSession, *, parent_id: int, book_id: int, include_hidden: bool = False
+) -> list[dict]:
+    book = await _get_book_for_parent(db, book_id, parent_id)
+    rows: list[dict] = []
+    for lemma in book.lemmas:
+        if lemma.is_hidden and not include_hidden:
+            continue
+        reason = suspicious_lemma_reason(lemma.lemma)
+        if reason is None:
+            continue
+        rows.append(
+            {
+                "id": lemma.id,
+                "lemma": lemma.lemma,
+                "frequency": lemma.frequency,
+                "rank": lemma.rank,
+                "in_study_set": lemma.in_study_set,
+                "is_hidden": lemma.is_hidden,
+                "reason": reason,
+            }
+        )
+    rows.sort(key=lambda row: (row["rank"], row["lemma"]))
+    return rows
+
+
+async def bulk_hide_lemmas(
+    db: AsyncSession,
+    *,
+    parent_id: int,
+    book_id: int,
+    lemma_ids: list[int],
+    hidden: bool,
+) -> Book:
+    book = await _get_book_for_parent(db, book_id, parent_id)
+    target_ids = set(lemma_ids)
+    if not target_ids:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="lemma_ids must not be empty",
+        )
+
+    for lemma in book.lemmas:
+        if lemma.id not in target_ids:
+            continue
+        lemma.is_hidden = hidden
+        if book.word_list_id is not None and lemma.dictionary_entry_id is not None:
+            item_result = await db.execute(
+                select(WordListItem).where(
+                    WordListItem.word_list_id == book.word_list_id,
+                    WordListItem.dictionary_entry_id == lemma.dictionary_entry_id,
+                )
+            )
+            item = item_result.scalar_one_or_none()
+            if hidden and item is not None:
+                await db.delete(item)
+            elif not hidden and lemma.in_study_set and item is None:
+                db.add(
+                    WordListItem(
+                        word_list_id=book.word_list_id,
+                        dictionary_entry_id=lemma.dictionary_entry_id,
+                        sort_order=lemma.rank,
+                    )
+                )
+
+    book.study_lemma_count = _apply_coverage(list(book.lemmas), book.coverage_target)
     await db.commit()
     return await _get_book_for_parent(db, book.id, parent_id)
 
@@ -575,3 +707,401 @@ def book_to_preview(book: Book, *, assigned_learner_ids: list[int] | None = None
         }
     )
     return summary
+
+
+def _placeholder_entry_filter():
+    return or_(
+        DictionaryEntry.source == "placeholder",
+        DictionaryEntry.definition.like("Definition pending%"),
+    )
+
+
+def _missing_zh_filter():
+    return or_(
+        DictionaryEntry.definition_zh_hant.is_(None),
+        func.trim(DictionaryEntry.definition_zh_hant) == "",
+    )
+
+
+def _book_entry_ids_query(parent_id: int):
+    return (
+        select(WordListItem.dictionary_entry_id)
+        .join(WordList, WordList.id == WordListItem.word_list_id)
+        .join(Book, Book.word_list_id == WordList.id)
+        .where(
+            Book.parent_id == parent_id,
+            Book.status == "confirmed",
+            Book.word_list_id.is_not(None),
+            WordList.source == "book",
+        )
+        .distinct()
+    )
+
+
+def entry_needs_en_refresh(entry: DictionaryEntry) -> bool:
+    return is_placeholder_definition(entry)
+
+
+def entry_needs_definition_refresh(entry: DictionaryEntry) -> bool:
+    if is_placeholder_definition(entry):
+        return True
+    zh = (entry.definition_zh_hant or "").strip()
+    return not zh
+
+
+async def get_books_definitions_summary(db: AsyncSession, parent_id: int) -> dict[str, int]:
+    entry_ids = _book_entry_ids_query(parent_id).subquery()
+
+    def _book_entries():
+        return select(DictionaryEntry).join(
+            entry_ids, DictionaryEntry.id == entry_ids.c.dictionary_entry_id
+        )
+
+    missing_en = await db.execute(
+        select(func.count()).select_from(
+            _book_entries().where(_placeholder_entry_filter()).subquery()
+        )
+    )
+    missing_zh = await db.execute(
+        select(func.count()).select_from(
+            _book_entries()
+            .where(not_(_placeholder_entry_filter()), _missing_zh_filter())
+            .subquery()
+        )
+    )
+    needs_refresh = await db.execute(
+        select(func.count()).select_from(
+            _book_entries()
+            .where(or_(_placeholder_entry_filter(), _missing_zh_filter()))
+            .subquery()
+        )
+    )
+    return {
+        "missing_en_count": int(missing_en.scalar_one()),
+        "missing_zh_count": int(missing_zh.scalar_one()),
+        "needs_refresh_count": int(needs_refresh.scalar_one()),
+    }
+
+
+async def _list_book_entry_ids_needing_en(db: AsyncSession, parent_id: int) -> list[int]:
+    entry_ids = _book_entry_ids_query(parent_id).subquery()
+    result = await db.execute(
+        select(DictionaryEntry.id)
+        .join(entry_ids, DictionaryEntry.id == entry_ids.c.dictionary_entry_id)
+        .where(_placeholder_entry_filter())
+        .order_by(DictionaryEntry.id)
+    )
+    return list(result.scalars().all())
+
+
+def _record_job_failure(job: DefinitionFillJob, *, word: str, entry_id: int) -> None:
+    failures: list[dict[str, int | str]] = []
+    if job.failed_words_json:
+        try:
+            raw = json.loads(job.failed_words_json)
+            if isinstance(raw, list):
+                failures = [row for row in raw if isinstance(row, dict)]
+        except json.JSONDecodeError:
+            failures = []
+    failures.append({"word": word, "entry_id": entry_id})
+    if len(failures) > MAX_JOB_FAILED_WORDS:
+        failures = failures[-MAX_JOB_FAILED_WORDS:]
+    job.failed_words_json = json.dumps(failures)
+
+
+async def list_book_placeholder_lemmas(
+    db: AsyncSession,
+    *,
+    parent_id: int,
+    job_id: int | None = None,
+    include_hidden: bool = False,
+) -> list[dict]:
+    entry_ids_filter: set[int] | None = None
+    if job_id is not None:
+        job = await db.get(DefinitionFillJob, job_id)
+        if job is None or job.parent_id != parent_id or job.scope != BOOK_FILL_SCOPE:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
+        entry_ids_filter = set()
+        if job.failed_words_json:
+            try:
+                raw = json.loads(job.failed_words_json)
+                if isinstance(raw, list):
+                    entry_ids_filter = {
+                        int(row["entry_id"])
+                        for row in raw
+                        if isinstance(row, dict) and row.get("entry_id")
+                    }
+            except (json.JSONDecodeError, TypeError, ValueError):
+                entry_ids_filter = set()
+
+    filters = [
+        Book.parent_id == parent_id,
+        Book.status == "confirmed",
+        BookLemma.dictionary_entry_id.is_not(None),
+        _placeholder_entry_filter(),
+    ]
+    if not include_hidden:
+        filters.append(BookLemma.is_hidden.is_(False))
+    if entry_ids_filter is not None:
+        filters.append(DictionaryEntry.id.in_(entry_ids_filter or [-1]))
+
+    result = await db.execute(
+        select(
+            BookLemma.id,
+            BookLemma.book_id,
+            Book.title,
+            BookLemma.lemma,
+            BookLemma.frequency,
+            BookLemma.in_study_set,
+            BookLemma.is_hidden,
+        )
+        .join(Book, BookLemma.book_id == Book.id)
+        .join(DictionaryEntry, DictionaryEntry.id == BookLemma.dictionary_entry_id)
+        .where(*filters)
+        .order_by(BookLemma.frequency.desc(), Book.title, BookLemma.lemma)
+    )
+    return [
+        {
+            "id": row.id,
+            "book_id": row.book_id,
+            "book_title": row.title,
+            "lemma": row.lemma,
+            "frequency": row.frequency,
+            "in_study_set": row.in_study_set,
+            "is_hidden": row.is_hidden,
+        }
+        for row in result.all()
+    ]
+
+
+async def get_current_book_definition_fill_job(
+    db: AsyncSession, parent_id: int
+) -> DefinitionFillJob | None:
+    active_result = await db.execute(
+        select(DefinitionFillJob)
+        .where(
+            DefinitionFillJob.parent_id == parent_id,
+            DefinitionFillJob.scope == BOOK_FILL_SCOPE,
+            DefinitionFillJob.status.in_(ACTIVE_JOB_STATUSES),
+        )
+        .order_by(DefinitionFillJob.id.desc())
+        .limit(1)
+    )
+    active_job = active_result.scalar_one_or_none()
+    if active_job is not None:
+        if _book_fill_job_is_stale(active_job):
+            active_job.status = "failed"
+            active_job.error_message = "Job interrupted — please start again."
+            active_job.finished_at = datetime.now(UTC)
+            await db.commit()
+            await db.refresh(active_job)
+        return active_job
+
+    result = await db.execute(
+        select(DefinitionFillJob)
+        .where(
+            DefinitionFillJob.parent_id == parent_id,
+            DefinitionFillJob.scope == BOOK_FILL_SCOPE,
+        )
+        .order_by(DefinitionFillJob.id.desc())
+        .limit(1)
+    )
+    job = result.scalar_one_or_none()
+    return job
+
+
+def _as_utc(dt: datetime) -> datetime:
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=UTC)
+    return dt.astimezone(UTC)
+
+
+def _book_fill_job_is_stale(job: DefinitionFillJob) -> bool:
+    if job.status not in ACTIVE_JOB_STATUSES:
+        return False
+    if job.finished_at is not None:
+        return True
+    if job.status == "running" and job.total == 0:
+        return True
+    if job.started_at is None:
+        return False
+    age_seconds = (datetime.now(UTC) - _as_utc(job.started_at)).total_seconds()
+    if job.processed == 0 and age_seconds > 120:
+        return True
+    if (
+        job.status == "running"
+        and job.total > 0
+        and job.processed < job.total
+        and age_seconds > 1800
+    ):
+        return True
+    return False
+
+
+async def _fail_stale_active_book_fill_jobs(db: AsyncSession, parent_id: int) -> None:
+    result = await db.execute(
+        select(DefinitionFillJob).where(
+            DefinitionFillJob.parent_id == parent_id,
+            DefinitionFillJob.scope == BOOK_FILL_SCOPE,
+            DefinitionFillJob.status.in_(ACTIVE_JOB_STATUSES),
+        )
+    )
+    stale_jobs = [job for job in result.scalars().all() if _book_fill_job_is_stale(job)]
+    if not stale_jobs:
+        return
+    for job in stale_jobs:
+        job.status = "failed"
+        job.error_message = "Job interrupted — please start again."
+        job.finished_at = datetime.now(UTC)
+    await db.commit()
+
+
+async def start_book_definition_fill_job(db: AsyncSession, parent_id: int) -> dict:
+    await _fail_stale_active_book_fill_jobs(db, parent_id)
+    active = await db.execute(
+        select(DefinitionFillJob).where(
+            DefinitionFillJob.parent_id == parent_id,
+            DefinitionFillJob.scope == BOOK_FILL_SCOPE,
+            DefinitionFillJob.status.in_(ACTIVE_JOB_STATUSES),
+        )
+    )
+    active_jobs = list(active.scalars().all())
+    if active_jobs:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "JOB_ALREADY_RUNNING",
+                "message": "A book definition fill job is already in progress",
+            },
+        )
+
+    total = (await get_books_definitions_summary(db, parent_id))["missing_en_count"]
+    if total == 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "NO_PLACEHOLDERS",
+                "message": "All book words already have English definitions",
+            },
+        )
+
+    job = DefinitionFillJob(
+        parent_id=parent_id,
+        scope=BOOK_FILL_SCOPE,
+        bank_id=None,
+        status="queued",
+        total=total,
+    )
+    db.add(job)
+    await db.commit()
+    await db.refresh(job)
+
+    asyncio.create_task(run_book_definition_fill_job(job.id))
+    return job_to_dict(job)
+
+
+async def cancel_book_definition_fill_job(db: AsyncSession, parent_id: int, job_id: int) -> dict:
+    job = await db.get(DefinitionFillJob, job_id)
+    if job is None or job.parent_id != parent_id or job.scope != BOOK_FILL_SCOPE:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
+    if job.status not in ACTIVE_JOB_STATUSES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Only queued or running jobs can be cancelled",
+        )
+    job.status = "cancelled"
+    job.finished_at = datetime.now(UTC)
+    await db.commit()
+    await db.refresh(job)
+    return job_to_dict(job)
+
+
+async def run_book_definition_fill_job(job_id: int) -> None:
+    async with AsyncSessionLocal() as db:
+        await execute_book_definition_fill_job(db, job_id)
+
+
+async def _refresh_entry_en(db: AsyncSession, entry: DictionaryEntry) -> None:
+    entry_id = entry.id
+    if not is_placeholder_definition(entry):
+        return
+    await db.commit()
+    entry = await db.get(DictionaryEntry, entry_id)
+    if entry is None:
+        return
+    await asyncio.wait_for(
+        fill_placeholder_definition(db, entry, api_only=True),
+        timeout=BOOK_FILL_PER_WORD_TIMEOUT,
+    )
+    await db.commit()
+    await db.refresh(entry)
+
+
+async def execute_book_definition_fill_job(db: AsyncSession, job_id: int) -> None:
+    try:
+        job = await db.get(DefinitionFillJob, job_id)
+        if job is None:
+            return
+        job.status = "running"
+        job.started_at = datetime.now(UTC)
+        await db.commit()
+
+        entry_ids = await _list_book_entry_ids_needing_en(db, job.parent_id)
+        job.total = len(entry_ids)
+        await db.commit()
+
+        processed = filled = failed = 0
+        for entry_id in entry_ids:
+            job = await db.get(DefinitionFillJob, job_id)
+            if job is None or job.status == "cancelled":
+                if job is not None:
+                    job.finished_at = datetime.now(UTC)
+                    await db.commit()
+                return
+
+            entry = await db.get(DictionaryEntry, entry_id)
+            if entry is None:
+                failed += 1
+            elif entry_needs_en_refresh(entry):
+                try:
+                    await _refresh_entry_en(db, entry)
+                    refreshed = await db.get(DictionaryEntry, entry_id)
+                    if refreshed is not None and not entry_needs_en_refresh(refreshed):
+                        filled += 1
+                    else:
+                        failed += 1
+                        if refreshed is not None:
+                            _record_job_failure(job, word=refreshed.word, entry_id=refreshed.id)
+                except (TimeoutError, Exception):
+                    failed += 1
+                    if entry is not None:
+                        _record_job_failure(job, word=entry.word, entry_id=entry.id)
+
+            processed += 1
+            job.processed = processed
+            job.filled = filled
+            job.failed = failed
+            should_commit = (
+                processed % BOOK_FILL_COMMIT_BATCH == 0 or processed >= len(entry_ids)
+            )
+            if not should_commit:
+                continue
+            await db.commit()
+
+        job = await db.get(DefinitionFillJob, job_id)
+        if job is None:
+            return
+        job.status = "completed"
+        job.processed = processed
+        job.filled = filled
+        job.failed = failed
+        job.finished_at = datetime.now(UTC)
+        await db.commit()
+    except Exception as exc:
+        await db.rollback()
+        job = await db.get(DefinitionFillJob, job_id)
+        if job is not None:
+            job.status = "failed"
+            job.error_message = fill_job_error_message_from_exception(exc)
+            job.finished_at = datetime.now(UTC)
+            await db.commit()

@@ -119,6 +119,41 @@ export async function hideBookLemma(
   );
 }
 
+export type SuspiciousLemma = {
+  id: number;
+  lemma: string;
+  frequency: number;
+  rank: number;
+  in_study_set: boolean;
+  is_hidden: boolean;
+  reason: string;
+};
+
+export async function getSuspiciousLemmas(
+  bookId: number,
+  includeHidden = false,
+): Promise<SuspiciousLemma[]> {
+  const params = includeHidden ? "?include_hidden=true" : "";
+  const response = await apiFetch<{ items: SuspiciousLemma[]; total: number }>(
+    `/books/${bookId}/suspicious-lemmas${params}`,
+    {},
+    API_BASE_URL,
+  );
+  return response.items;
+}
+
+export async function bulkHideBookLemmas(
+  bookId: number,
+  lemmaIds: number[],
+  hidden: boolean,
+): Promise<BookSummary> {
+  return apiFetch<BookSummary>(
+    `/books/${bookId}/lemmas/bulk-hide`,
+    { method: "POST", body: JSON.stringify({ lemma_ids: lemmaIds, hidden }) },
+    API_BASE_URL,
+  );
+}
+
 export async function getBookProgress(bookId: number, learnerId?: number): Promise<BookProgress[]> {
   const params = learnerId != null ? `?learner_id=${learnerId}` : "";
   return apiFetch<BookProgress[]>(`/books/${bookId}/progress${params}`, {}, API_BASE_URL);
@@ -126,4 +161,80 @@ export async function getBookProgress(bookId: number, learnerId?: number): Promi
 
 export async function getMyBookProgress(): Promise<BookProgress | null> {
   return apiFetch<BookProgress | null>("/loop/book-progress", {}, API_BASE_URL);
+}
+
+export type BookDefinitionsSummary = {
+  needs_refresh_count: number;
+  missing_en_count: number;
+  missing_zh_count: number;
+};
+
+export type DefinitionFillJob = {
+  id: number;
+  status: string;
+  total: number;
+  processed: number;
+  filled: number;
+  failed: number;
+  error_message: string | null;
+  started_at: string | null;
+  finished_at: string | null;
+};
+
+export async function getBooksDefinitionsSummary(): Promise<BookDefinitionsSummary> {
+  return apiFetch<BookDefinitionsSummary>("/books/definitions-summary", {}, API_BASE_URL);
+}
+
+export async function startBookDefinitionFillJob(): Promise<DefinitionFillJob> {
+  return apiFetch<DefinitionFillJob>(
+    "/books/fill-definitions",
+    { method: "POST" },
+    API_BASE_URL,
+  );
+}
+
+export async function getCurrentBookDefinitionFillJob(): Promise<DefinitionFillJob | null> {
+  return apiFetch<DefinitionFillJob | null>(
+    "/books/fill-definitions/current",
+    {},
+    API_BASE_URL,
+  );
+}
+
+export async function cancelBookDefinitionFillJob(jobId: number): Promise<DefinitionFillJob> {
+  return apiFetch<DefinitionFillJob>(
+    `/books/fill-definitions/${jobId}/cancel`,
+    { method: "POST" },
+    API_BASE_URL,
+  );
+}
+
+export type PlaceholderLemma = {
+  id: number;
+  book_id: number;
+  book_title: string;
+  lemma: string;
+  frequency: number;
+  in_study_set: boolean;
+  is_hidden: boolean;
+};
+
+export async function getPlaceholderLemmas(
+  jobId?: number,
+  includeHidden = false,
+): Promise<PlaceholderLemma[]> {
+  const params = new URLSearchParams();
+  if (jobId != null) {
+    params.set("job_id", String(jobId));
+  }
+  if (includeHidden) {
+    params.set("include_hidden", "true");
+  }
+  const query = params.toString();
+  const response = await apiFetch<{ items: PlaceholderLemma[]; total: number }>(
+    `/books/placeholder-lemmas${query ? `?${query}` : ""}`,
+    {},
+    API_BASE_URL,
+  );
+  return response.items;
 }

@@ -6,6 +6,7 @@ from app.core.rate_limit import limiter
 from app.database import get_db
 from app.models.user import User
 from app.schemas.loop import (
+    DefinitionFillJobResponse,
     WordBankDeleteResponse,
     WordBankImportResponse,
     WordBankItemsResponse,
@@ -45,6 +46,7 @@ async def list_word_bank_items(
     q: str | None = Query(default=None, max_length=128),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=50, ge=1, le=100),
+    placeholders_only: bool = Query(default=False),
 ) -> WordBankItemsResponse:
     data = await word_bank_service.list_bank_items(
         db,
@@ -54,8 +56,40 @@ async def list_word_bank_items(
         query=q,
         page=page,
         page_size=page_size,
+        placeholders_only=placeholders_only,
     )
     return WordBankItemsResponse(**data)
+
+
+@router.post("/fill-definitions", response_model=DefinitionFillJobResponse)
+async def start_fill_definitions(
+    parent: User = Depends(require_parent),
+    db: AsyncSession = Depends(get_db),
+) -> DefinitionFillJobResponse:
+    limiter.check(key=f"bank-fill-defs:{parent.id}", limit=1, window_seconds=60 * 60)
+    data = await word_bank_service.start_definition_fill_job(db, parent.id)
+    return DefinitionFillJobResponse(**data)
+
+
+@router.get("/fill-definitions/current", response_model=DefinitionFillJobResponse | None)
+async def get_current_fill_definitions_job(
+    parent: User = Depends(require_parent),
+    db: AsyncSession = Depends(get_db),
+) -> DefinitionFillJobResponse | None:
+    job = await word_bank_service.get_current_definition_fill_job(db, parent.id)
+    if job is None:
+        return None
+    return DefinitionFillJobResponse(**word_bank_service.job_to_dict(job))
+
+
+@router.post("/fill-definitions/{job_id}/cancel", response_model=DefinitionFillJobResponse)
+async def cancel_fill_definitions_job(
+    job_id: int,
+    parent: User = Depends(require_parent),
+    db: AsyncSession = Depends(get_db),
+) -> DefinitionFillJobResponse:
+    data = await word_bank_service.cancel_definition_fill_job(db, parent.id, job_id)
+    return DefinitionFillJobResponse(**data)
 
 
 @router.delete("", response_model=WordBankDeleteResponse)
