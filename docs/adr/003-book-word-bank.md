@@ -16,8 +16,10 @@ anchor only** — not a kid reading target.
 
 Book mode replaces **new-word drip**, not the whole challenge.
 
-- New cards come from the learner's **active book** study set.
-- Retention cards still come from **baseline family-bank SRS**.
+- New cards come from the learner's **active book** study set, filtered by family-bank
+  CEFR: keep lemmas **at or above** the learner's level; keep **unbanked** lemmas;
+  drop below-level bank tags. Empty filter → retention-only day (`book_new_drip_empty`).
+- Retention cards still come from **baseline family-bank SRS** (any released level).
 - Daily challenge shell (recognition SRS + Listen & Pick) is unchanged.
 
 Closing the book assignment restores normal bank drip.

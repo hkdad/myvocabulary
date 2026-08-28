@@ -467,7 +467,7 @@ async def test_delete_confirmed_book_with_practice_srs_cards(client: AsyncClient
 @pytest.mark.asyncio
 async def test_progress_credits_baseline_srs(client: AsyncClient, db_session) -> None:
     parent_token = await _login(client, "parent", "parent123")
-    csv_content = "word,definition,level,category\nfox,A wild animal,A1,Animals\n"
+    csv_content = "word,definition,level,category\nhill,A small mountain,A1,Nature\n"
     await client.post(
         "/api/v1/word-bank/import",
         headers={"Authorization": f"Bearer {parent_token}"},
@@ -476,14 +476,14 @@ async def test_progress_credits_baseline_srs(client: AsyncClient, db_session) ->
     learner = (
         await db_session.execute(select(Learner).where(Learner.display_name == "Leo"))
     ).scalar_one()
-    fox_entry = (
-        await db_session.execute(select(DictionaryEntry).where(DictionaryEntry.word == "fox"))
+    hill_entry = (
+        await db_session.execute(select(DictionaryEntry).where(DictionaryEntry.word == "hill"))
     ).scalar_one()
     card = (
         await db_session.execute(
             select(SrsCard).where(
                 SrsCard.learner_id == learner.id,
-                SrsCard.dictionary_entry_id == fox_entry.id,
+                SrsCard.dictionary_entry_id == hill_entry.id,
             )
         )
     ).scalar_one()
@@ -533,7 +533,7 @@ async def test_learner_words_overlap_shows_bank_level_and_book(
     client: AsyncClient, db_session
 ) -> None:
     parent_token = await _login(client, "parent", "parent123")
-    csv_content = "word,definition,level,category\nfox,A wild animal,A1,Animals\n"
+    csv_content = "word,definition,level,category\nhill,A small mountain,A1,Nature\n"
     await client.post(
         "/api/v1/word-bank/import",
         headers={"Authorization": f"Bearer {parent_token}"},
@@ -542,14 +542,14 @@ async def test_learner_words_overlap_shows_bank_level_and_book(
     learner = (
         await db_session.execute(select(Learner).where(Learner.display_name == "Leo"))
     ).scalar_one()
-    fox_entry = (
-        await db_session.execute(select(DictionaryEntry).where(DictionaryEntry.word == "fox"))
+    hill_entry = (
+        await db_session.execute(select(DictionaryEntry).where(DictionaryEntry.word == "hill"))
     ).scalar_one()
     card = (
         await db_session.execute(
             select(SrsCard).where(
                 SrsCard.learner_id == learner.id,
-                SrsCard.dictionary_entry_id == fox_entry.id,
+                SrsCard.dictionary_entry_id == hill_entry.id,
             )
         )
     ).scalar_one()
@@ -589,9 +589,9 @@ async def test_learner_words_overlap_shows_bank_level_and_book(
     )
     assert words.status_code == 200
     payload = words.json()
-    fox_row = next(item for item in payload["items"] if item["word"] == "fox")
-    assert "A1" in fox_row["levels"]
-    assert book_title in fox_row["levels"]
+    hill_row = next(item for item in payload["items"] if item["word"] == "hill")
+    assert "A1" in hill_row["levels"]
+    assert book_title in hill_row["levels"]
     assert payload["by_bank_level"].get("A1", 0) >= 1
     assert payload["by_book"].get(book_title, 0) >= 1
     assert payload["by_level"].get("A1", 0) >= 1
@@ -601,13 +601,13 @@ async def test_learner_words_overlap_shows_bank_level_and_book(
         "/api/v1/loop/words?level=A1",
         headers={"Authorization": f"Bearer {leo_token}"},
     )
-    assert any(item["word"] == "fox" for item in by_a1.json()["items"])
+    assert any(item["word"] == "hill" for item in by_a1.json()["items"])
 
     by_book = await client.get(
         f"/api/v1/loop/words?level={book_title}",
         headers={"Authorization": f"Bearer {leo_token}"},
     )
-    assert any(item["word"] == "fox" for item in by_book.json()["items"])
+    assert any(item["word"] == "hill" for item in by_book.json()["items"])
 
 
 @pytest.mark.asyncio
@@ -717,3 +717,269 @@ async def test_bulk_hide_suspicious_lemmas_on_confirmed_book(
         await db_session.execute(select(BookLemma).where(BookLemma.id == junk_lemma.id))
     ).scalar_one()
     assert refreshed.is_hidden is True
+
+
+async def test_book_drip_excludes_below_level_keeps_unbanked(
+    client: AsyncClient, db_session
+) -> None:
+    """Book new drip skips below-level bank tags; unbanked study lemmas still drip."""
+    parent_token = await _login(client, "parent", "parent123")
+    csv_content = (
+        "word,definition,level,category\n"
+        "fox,A wild animal,A1,Animals\n"
+        "hill,A small mountain,A2,Nature\n"
+        "sat,Past of sit,A2,Actions\n"
+        "bankkeep,Filler,A2,General\n"
+    )
+    imported = await client.post(
+        "/api/v1/word-bank/import",
+        headers={"Authorization": f"Bearer {parent_token}"},
+        files={"file": ("bank.csv", io.BytesIO(csv_content.encode()), "text/csv")},
+    )
+    assert imported.status_code == 200
+
+    learner = (
+        await db_session.execute(select(Learner).where(Learner.display_name == "Leo"))
+    ).scalar_one()
+    learner.english_level = "A2"
+    await db_session.commit()
+
+    preview = await client.post(
+        "/api/v1/books/preview",
+        headers={"Authorization": f"Bearer {parent_token}"},
+        files={"file": ("fox.txt", io.BytesIO(FOX_STORY.encode()), "text/plain")},
+    )
+    book_id = preview.json()["id"]
+    confirm = await client.post(
+        f"/api/v1/books/{book_id}/confirm",
+        headers={"Authorization": f"Bearer {parent_token}"},
+        json={"coverage_target": 0.8, "title": "Fox Level Filter"},
+    )
+    assert confirm.status_code == 200
+    book_list_id = confirm.json()["word_list_id"]
+    await client.post(
+        f"/api/v1/books/{book_id}/assign",
+        headers={"Authorization": f"Bearer {parent_token}"},
+        json={"learner_id": learner.id},
+    )
+
+    leo_token = await _login(client, "leo", "leo")
+    with (
+        patch("app.services.dictionary_service.generate_kid_definition", return_value=None),
+        patch(
+            "app.services.dictionary_service.fetch_from_api",
+            side_effect=Exception("offline"),
+        ),
+    ):
+        mix = await client.get(
+            "/api/v1/loop/today",
+            headers={"Authorization": f"Bearer {leo_token}"},
+        )
+    assert mix.status_code == 200
+    payload = mix.json()
+    assert payload["source_kind"] == "book"
+    assert payload["book_new_drip_empty"] is False
+    assert payload["new_count"] >= 1
+
+    released_today = (
+        await db_session.execute(
+            select(SrsCard, DictionaryEntry.word)
+            .join(DictionaryEntry, DictionaryEntry.id == SrsCard.dictionary_entry_id)
+            .where(
+                SrsCard.learner_id == learner.id,
+                SrsCard.released_at.is_not(None),
+                SrsCard.word_list_id == book_list_id,
+            )
+        )
+    ).all()
+    dripped_words = {word for _card, word in released_today}
+    assert "fox" not in dripped_words
+    assert dripped_words & {"hill", "sit", "carrot", "rabbit", "run"}
+
+
+@pytest.mark.asyncio
+async def test_book_drip_empty_pool_retention_only(client: AsyncClient, db_session) -> None:
+    """When every bank-tagged study lemma is below level, drip is empty; retention still runs."""
+    parent_token = await _login(client, "parent", "parent123")
+    csv_content = (
+        "word,definition,level,category\n"
+        "fox,A wild animal,A1,Animals\n"
+        "hill,A small mountain,A1,Nature\n"
+        "sit,Past of sit,A1,Actions\n"
+        "carrot,Orange vegetable,A1,Food\n"
+        "rabbit,A small animal,A1,Animals\n"
+        "run,To move fast,A1,Actions\n"
+        "bankkeep,Filler for retention,A1,General\n"
+    )
+    imported = await client.post(
+        "/api/v1/word-bank/import",
+        headers={"Authorization": f"Bearer {parent_token}"},
+        files={"file": ("bank.csv", io.BytesIO(csv_content.encode()), "text/csv")},
+    )
+    assert imported.status_code == 200
+
+    learner = (
+        await db_session.execute(select(Learner).where(Learner.display_name == "Leo"))
+    ).scalar_one()
+    learner.english_level = "B1"
+    await db_session.commit()
+
+    retention_entry = (
+        await db_session.execute(select(DictionaryEntry).where(DictionaryEntry.word == "bankkeep"))
+    ).scalar_one()
+    retention_card = (
+        await db_session.execute(
+            select(SrsCard).where(
+                SrsCard.learner_id == learner.id,
+                SrsCard.dictionary_entry_id == retention_entry.id,
+            )
+        )
+    ).scalar_one()
+    now = datetime.now(UTC)
+    yesterday = now - timedelta(days=1)
+    retention_card.released_at = yesterday
+    retention_card.due_at = now - timedelta(hours=1)
+    retention_card.last_reviewed_at = yesterday
+    retention_card.state = "review"
+    retention_card.interval_days = 5
+    retention_card.repetitions = 1
+    db_session.add(
+        SrsReviewLog(
+            srs_card_id=retention_card.id,
+            learner_id=learner.id,
+            quality=4,
+            reviewed_at=yesterday,
+        )
+    )
+    await db_session.commit()
+
+    preview = await client.post(
+        "/api/v1/books/preview",
+        headers={"Authorization": f"Bearer {parent_token}"},
+        files={"file": ("fox.txt", io.BytesIO(FOX_STORY.encode()), "text/plain")},
+    )
+    book_id = preview.json()["id"]
+    confirm = await client.post(
+        f"/api/v1/books/{book_id}/confirm",
+        headers={"Authorization": f"Bearer {parent_token}"},
+        json={"coverage_target": 0.8, "title": "All Below Level"},
+    )
+    assert confirm.status_code == 200
+    await client.post(
+        f"/api/v1/books/{book_id}/assign",
+        headers={"Authorization": f"Bearer {parent_token}"},
+        json={"learner_id": learner.id},
+    )
+
+    leo_token = await _login(client, "leo", "leo")
+    with (
+        patch("app.services.dictionary_service.generate_kid_definition", return_value=None),
+        patch(
+            "app.services.dictionary_service.fetch_from_api",
+            side_effect=Exception("offline"),
+        ),
+    ):
+        mix = await client.get(
+            "/api/v1/loop/today",
+            headers={"Authorization": f"Bearer {leo_token}"},
+        )
+    assert mix.status_code == 200
+    payload = mix.json()
+    assert payload["source_kind"] == "book"
+    assert payload["book_new_drip_empty"] is True
+    assert payload["new_count"] == 0
+    assert payload["retention_count"] >= 1
+    mix_words = {card["dictionary_entry"]["word"] for card in payload["cards"]}
+    assert "bankkeep" in mix_words
+
+
+@pytest.mark.asyncio
+async def test_book_retention_still_includes_below_level_srs(
+    client: AsyncClient, db_session
+) -> None:
+    """Learning/familiar retention still pulls below-level bank SRS in book mode."""
+    parent_token = await _login(client, "parent", "parent123")
+    csv_content = (
+        "word,definition,level,category\n"
+        "fox,A wild animal,A1,Animals\n"
+        "hill,A small mountain,A2,Nature\n"
+        "oldword,Prior band,A1,General\n"
+    )
+    imported = await client.post(
+        "/api/v1/word-bank/import",
+        headers={"Authorization": f"Bearer {parent_token}"},
+        files={"file": ("bank.csv", io.BytesIO(csv_content.encode()), "text/csv")},
+    )
+    assert imported.status_code == 200
+
+    learner = (
+        await db_session.execute(select(Learner).where(Learner.display_name == "Leo"))
+    ).scalar_one()
+    learner.english_level = "A2"
+    await db_session.commit()
+
+    old_entry = (
+        await db_session.execute(select(DictionaryEntry).where(DictionaryEntry.word == "oldword"))
+    ).scalar_one()
+    old_card = (
+        await db_session.execute(
+            select(SrsCard).where(
+                SrsCard.learner_id == learner.id,
+                SrsCard.dictionary_entry_id == old_entry.id,
+            )
+        )
+    ).scalar_one()
+    now = datetime.now(UTC)
+    yesterday = now - timedelta(days=1)
+    old_card.released_at = yesterday
+    old_card.due_at = now - timedelta(hours=1)
+    old_card.last_reviewed_at = yesterday
+    old_card.state = "review"
+    old_card.interval_days = 5
+    old_card.repetitions = 1
+    db_session.add(
+        SrsReviewLog(
+            srs_card_id=old_card.id,
+            learner_id=learner.id,
+            quality=4,
+            reviewed_at=yesterday,
+        )
+    )
+    await db_session.commit()
+
+    preview = await client.post(
+        "/api/v1/books/preview",
+        headers={"Authorization": f"Bearer {parent_token}"},
+        files={"file": ("fox.txt", io.BytesIO(FOX_STORY.encode()), "text/plain")},
+    )
+    book_id = preview.json()["id"]
+    await client.post(
+        f"/api/v1/books/{book_id}/confirm",
+        headers={"Authorization": f"Bearer {parent_token}"},
+        json={"coverage_target": 0.8, "title": "Retention Below"},
+    )
+    await client.post(
+        f"/api/v1/books/{book_id}/assign",
+        headers={"Authorization": f"Bearer {parent_token}"},
+        json={"learner_id": learner.id},
+    )
+
+    leo_token = await _login(client, "leo", "leo")
+    with (
+        patch("app.services.dictionary_service.generate_kid_definition", return_value=None),
+        patch(
+            "app.services.dictionary_service.fetch_from_api",
+            side_effect=Exception("offline"),
+        ),
+    ):
+        mix = await client.get(
+            "/api/v1/loop/today",
+            headers={"Authorization": f"Bearer {leo_token}"},
+        )
+    assert mix.status_code == 200
+    payload = mix.json()
+    assert payload["source_kind"] == "book"
+    mix_words = {card["dictionary_entry"]["word"] for card in payload["cards"]}
+    assert "oldword" in mix_words or payload["retention_count"] >= 1
+    if payload["retention_count"] >= 1:
+        assert "oldword" in mix_words
