@@ -78,11 +78,16 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   },
   restoreSession: async () => {
     try {
-      const tokenPayload = await apiFetch<{ access_token: string }>(
-        "/auth/refresh",
-        { method: "POST" },
-        API_BASE_URL,
-      );
+      const tokenPayload = await Promise.race([
+        apiFetch<{ access_token: string }>(
+          "/auth/refresh",
+          { method: "POST" },
+          API_BASE_URL,
+        ),
+        new Promise<never>((_, reject) => {
+          window.setTimeout(() => reject(new Error("Session restore timed out")), 15_000);
+        }),
+      ]);
       get().setAccessToken(tokenPayload.access_token);
       const user = await apiFetch<AuthUser>("/auth/me", {}, API_BASE_URL);
       get().setUser(user);
