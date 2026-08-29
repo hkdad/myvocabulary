@@ -13,6 +13,9 @@ export type SrsCard = {
   last_quality: number | null;
   state: string;
   word_list_id: number | null;
+  level: string | null;
+  books: string[];
+  strength: string;
 };
 
 export type DueCardsResponse = {

@@ -115,8 +115,12 @@ async def test_due_cards_and_answer_updates_sm2(client, db_session) -> None:
     due_payload = due.json()
     assert due_payload["due_count"] == cards_before + 3
     assert len(due_payload["cards"]) == cards_before + 3
+    first_card = due_payload["cards"][0]
+    assert first_card["strength"] == "new"
+    assert first_card["books"] == []
+    assert "level" in first_card
 
-    card_id = due_payload["cards"][0]["id"]
+    card_id = first_card["id"]
     answer = await client.post(
         f"/api/v1/reviews/{card_id}/answer",
         headers={"Authorization": f"Bearer {leo_token}"},

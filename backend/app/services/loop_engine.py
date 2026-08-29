@@ -186,6 +186,80 @@ def strength_for_card(card: SrsCard, distinct_days_map: dict[int, int]) -> str |
     return derive_strength(distinct_review_days=days)
 
 
+async def card_display_metadata(
+    db: AsyncSession,
+    *,
+    learner: Learner,
+    parent_id: int | None,
+    cards: list[SrsCard],
+) -> dict[int, dict[str, str | list[str] | None]]:
+    """Per-card bank level, book labels, and strength for SRS challenge UI."""
+    if not cards:
+        return {}
+
+    entry_ids = [card.dictionary_entry_id for card in cards]
+    bank_items_by_entry: dict[int, WordListItem] = {}
+    bank: WordList | None = None
+    if parent_id is not None:
+        bank = await get_family_bank(db, parent_id)
+        if bank is not None:
+            items_result = await db.execute(
+                select(WordListItem).where(
+                    WordListItem.word_list_id == bank.id,
+                    WordListItem.dictionary_entry_id.in_(entry_ids),
+                )
+            )
+            for item in items_result.scalars().all():
+                bank_items_by_entry[item.dictionary_entry_id] = item
+
+    list_ids = {card.word_list_id for card in cards if card.word_list_id is not None}
+    if bank is not None:
+        list_ids.discard(bank.id)
+    book_list_names: dict[int, str] = {}
+    if list_ids:
+        lists_result = await db.execute(
+            select(WordList.id, WordList.name).where(
+                WordList.id.in_(list_ids),
+                WordList.source == "book",
+            )
+        )
+        book_list_names = {row.id: row.name for row in lists_result.all()}
+
+    book_entry_labels: dict[int, str] = {}
+    from app.services import book_service
+
+    active_book = await book_service.get_active_book_for_learner(db, learner.id)
+    if active_book is not None and active_book.word_list_id is not None:
+        for entry_id in await book_service.study_entry_ids(db, active_book):
+            book_entry_labels[entry_id] = active_book.title
+
+    distinct_days_map = await distinct_review_days_by_card(
+        db, [card.id for card in cards if card.id]
+    )
+
+    metadata: dict[int, dict[str, str | list[str] | None]] = {}
+    for card in cards:
+        if card.id is None:
+            continue
+        item = bank_items_by_entry.get(card.dictionary_entry_id)
+        bank_level = (item.level or "").strip() if item is not None and item.level else None
+        books: list[str] = []
+        book_from_card = (
+            book_list_names.get(card.word_list_id) if card.word_list_id is not None else None
+        )
+        book_from_study = book_entry_labels.get(card.dictionary_entry_id)
+        for book_label in (book_from_card, book_from_study):
+            if book_label and book_label not in books:
+                books.append(book_label)
+        strength = strength_for_card(card, distinct_days_map) or "new"
+        metadata[card.id] = {
+            "level": bank_level,
+            "books": books,
+            "strength": strength,
+        }
+    return metadata
+
+
 def _empty_strength_counts() -> dict[str, int]:
     return {
         "bank_total": 0,
@@ -1326,7 +1400,7 @@ async def build_daily_mix(
 
     await srs_service.enrich_cards_zh_hant(db, cards)
     mix = {
-        "cards": [srs_service.card_to_dict(card) for card in cards],
+        "cards": await srs_service.cards_to_dicts(db, learner_id=learner.id, cards=cards),
         "new_count": new_count,
         "retention_count": retention_count,
         "learning_retention_count": learning_retention_count,
@@ -1416,7 +1490,7 @@ async def get_today_mix_cards(
         cards_by_id = {card.id: card for card in loaded.scalars().all()}
         ordered = [cards_by_id[card_id] for card_id in card_ids if card_id in cards_by_id]
         await srs_service.enrich_cards_zh_hant(db, ordered)
-        cards = [srs_service.card_to_dict(card) for card in ordered]
+        cards = await srs_service.cards_to_dicts(db, learner_id=learner.id, cards=ordered)
     return {
         "cards": cards,
         "due_count": len(cards),

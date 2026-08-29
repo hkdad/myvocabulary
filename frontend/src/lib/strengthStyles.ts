@@ -1,8 +1,25 @@
 export const STRENGTH_STYLES = {
-  learning: { fill: "bg-amber-400", tag: "bg-amber-400 text-white" },
-  familiar: { fill: "bg-blue-400", tag: "bg-blue-400 text-white" },
+  new: { fill: "bg-violet-400", tag: "bg-violet-400 text-white" },
+  learning: { fill: "bg-sky-400", tag: "bg-sky-400 text-white" },
+  familiar: { fill: "bg-amber-400", tag: "bg-amber-400 text-white" },
   mastered: { fill: "bg-emerald-500", tag: "bg-emerald-500 text-white" },
 } as const;
+
+export type CardStrength = keyof typeof STRENGTH_STYLES;
+
+export function strengthLabel(strength: string): string {
+  if (strength === "familiar") return "Familiar";
+  if (strength === "mastered") return "Mastered";
+  if (strength === "new") return "New";
+  return "Learning";
+}
+
+export function strengthTagClass(strength: string): string {
+  if (strength === "mastered") return STRENGTH_STYLES.mastered.tag;
+  if (strength === "familiar") return STRENGTH_STYLES.familiar.tag;
+  if (strength === "new") return STRENGTH_STYLES.new.tag;
+  return STRENGTH_STYLES.learning.tag;
+}
 
 export function segmentPercent(count: number, total: number): number {
   if (total <= 0 || count <= 0) {

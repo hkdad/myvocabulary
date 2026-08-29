@@ -44,7 +44,8 @@ def _entry_summary(entry: DictionaryEntry) -> dict:
     return word_list_service.entry_summary(entry)
 
 
-def card_to_dict(card: SrsCard) -> dict:
+def card_to_dict(card: SrsCard, *, metadata: dict | None = None) -> dict:
+    extra = metadata or {}
     return {
         "id": card.id,
         "dictionary_entry": _entry_summary(card.dictionary_entry),
@@ -56,7 +57,27 @@ def card_to_dict(card: SrsCard) -> dict:
         "last_quality": card.last_quality,
         "state": card.state,
         "word_list_id": card.word_list_id,
+        "level": extra.get("level"),
+        "books": extra.get("books") or [],
+        "strength": extra.get("strength") or "new",
     }
+
+
+async def cards_to_dicts(db: AsyncSession, *, learner_id: int, cards: list[SrsCard]) -> list[dict]:
+    if not cards:
+        return []
+    learner_result = await db.execute(select(Learner).where(Learner.id == learner_id))
+    learner = learner_result.scalar_one_or_none()
+    metadata: dict[int, dict] = {}
+    if learner is not None:
+        parent_id = await loop_engine.get_learner_parent_id(db, learner)
+        metadata = await loop_engine.card_display_metadata(
+            db, learner=learner, parent_id=parent_id, cards=cards
+        )
+    return [
+        card_to_dict(card, metadata=metadata.get(card.id, {}) if card.id else {})
+        for card in cards
+    ]
 
 
 async def enrich_cards_zh_hant(
@@ -235,7 +256,7 @@ async def get_due_cards(
         cards = cards[:max_cards]
         await enrich_cards_zh_hant(db, cards)
         return {
-            "cards": [card_to_dict(card) for card in cards],
+            "cards": await cards_to_dicts(db, learner_id=learner_id, cards=cards),
             "due_count": due_count,
             "daily_goal": daily_goal,
         }
@@ -283,7 +304,7 @@ async def get_due_cards(
     cards = list(result.scalars().all())
     await enrich_cards_zh_hant(db, cards)
     return {
-        "cards": [card_to_dict(card) for card in cards],
+        "cards": await cards_to_dicts(db, learner_id=learner_id, cards=cards),
         "due_count": due_count,
         "daily_goal": daily_goal,
     }
@@ -378,7 +399,8 @@ async def answer_card(db: AsyncSession, *, learner_id: int, card_id: int, qualit
         select(SrsCard).options(selectinload(SrsCard.dictionary_entry)).where(SrsCard.id == card.id)
     )
     refreshed = result.scalar_one()
-    return {"card": card_to_dict(refreshed)}
+    enriched = await cards_to_dicts(db, learner_id=learner_id, cards=[refreshed])
+    return {"card": enriched[0]}
 
 
 async def get_mistake_cards(db: AsyncSession, *, learner_id: int) -> list[dict]:

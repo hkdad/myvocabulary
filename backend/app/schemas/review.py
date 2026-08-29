@@ -16,6 +16,9 @@ class SrsCardResponse(BaseModel):
     last_quality: int | None
     state: str
     word_list_id: int | None
+    level: str | None = None
+    books: list[str] = Field(default_factory=list)
+    strength: str = "new"
 
 
 class DueCardsResponse(BaseModel):

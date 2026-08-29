@@ -3,6 +3,7 @@ import { useState } from "react";
 import type { SrsCard } from "../api/reviews";
 import type { DefinitionChoice } from "../lib/definitionChoices";
 import { definitionsMatch } from "../lib/definitionChoices";
+import { strengthLabel, strengthTagClass } from "../lib/strengthStyles";
 import AudioPlayer from "./AudioPlayer";
 import ClearTranslationButton from "./ClearTranslationButton";
 
@@ -53,6 +54,26 @@ export default function FlashcardDeck({
           : "bg-gradient-to-br from-purple-50/90 to-pink-50/90"
       }`}
     >
+      <div className="mb-3 flex flex-wrap gap-2">
+        {card.level && (
+          <span className="rounded-full bg-slate-200/90 px-2.5 py-0.5 text-xs font-bold uppercase tracking-wide text-warm-brown">
+            {card.level}
+          </span>
+        )}
+        {card.books.map((book) => (
+          <span
+            key={book}
+            className="rounded-full bg-orange-100 px-2.5 py-0.5 text-xs font-bold text-warm-brown"
+          >
+            {book}
+          </span>
+        ))}
+        <span
+          className={`rounded-full px-2.5 py-0.5 text-xs font-bold ${strengthTagClass(card.strength)}`}
+        >
+          {strengthLabel(card.strength)}
+        </span>
+      </div>
       <div>
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
