@@ -458,12 +458,8 @@ export default function DailyChallengePage() {
             void loadPrompt(sessionId);
           }, AUTO_QUALITY_ADVANCE_MS);
         }
-      } else if (result.can_retry || (dictationMode === "choice" && result.retries_remaining > 0)) {
+      } else if (result.can_retry) {
         setAnswer("");
-        setFeedback(null);
-        if (dictationMode === "choice" && session) {
-          await loadPrompt(session.id);
-        }
       } else if (result.session_complete) {
         if (result.expected_word && result.syllables) {
           setTeaching({ word: result.expected_word, syllables: result.syllables });
@@ -748,7 +744,10 @@ export default function DailyChallengePage() {
   }
 
   const inputLocked =
-    awaitingAdvance || Boolean(teaching) || Boolean(feedback?.is_correct);
+    awaitingAdvance ||
+    Boolean(teaching) ||
+    Boolean(feedback?.is_correct) ||
+    Boolean(feedback && !feedback.is_correct && feedback.expected_word);
 
   return (
     <PageShell variant={shellVariant}>
@@ -822,9 +821,11 @@ export default function DailyChallengePage() {
                 )}
                 {feedback && !feedback.is_correct && (
                   <p className="font-semibold text-amber-800">
-                    {feedback.retries_remaining > 0
-                      ? `Try again — ${feedback.retries_remaining} left`
-                      : "Not quite — listen again and pick another."}
+                    {feedback.expected_word
+                      ? `Not quite — it was “${feedback.expected_word}”`
+                      : feedback.retries_remaining > 0
+                        ? `Try again — ${feedback.retries_remaining} left`
+                        : "Not quite — that wasn't it."}
                   </p>
                 )}
                 {awaitingAdvance && (

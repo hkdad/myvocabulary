@@ -20,6 +20,7 @@ from app.models.word_list import MistakeLog
 from app.services import loop_engine, srs_service, tts_service, word_list_service
 
 KID_MAX_ATTEMPTS = 3
+CHALLENGE_SINGLE_ATTEMPT_SOURCES = frozenset({"daily_challenge", "mistakes"})
 
 
 def _session_to_dict(session: DictationSession) -> dict:
@@ -81,30 +82,36 @@ async def _get_attempts(db: AsyncSession, session_id: int) -> list[DictationAtte
     return list(result.scalars().all())
 
 
-def _max_attempts_for_mode(mode: str) -> int:
+def _max_attempts(mode: str, source: str) -> int:
+    if mode == "choice" and source in CHALLENGE_SINGLE_ATTEMPT_SOURCES:
+        return 1
     return KID_MAX_ATTEMPTS if mode == "choice" else 1
 
 
-def _is_entry_resolved(entry_id: int, attempts: list[DictationAttempt], mode: str) -> bool:
+def _is_entry_resolved(
+    entry_id: int, attempts: list[DictationAttempt], mode: str, source: str
+) -> bool:
     entry_attempts = _attempts_for_entry(attempts, entry_id)
     if any(attempt.is_correct for attempt in entry_attempts):
         return True
     if mode == "typed":
         return any(attempt.submitted_answer == GIVE_UP_MARKER for attempt in entry_attempts)
-    return len(entry_attempts) >= _max_attempts_for_mode(mode)
+    return len(entry_attempts) >= _max_attempts(mode, source)
 
 
 def _current_entry_id(
-    entry_ids: list[int], attempts: list[DictationAttempt], mode: str
+    entry_ids: list[int], attempts: list[DictationAttempt], mode: str, source: str
 ) -> int | None:
     for entry_id in entry_ids:
-        if not _is_entry_resolved(entry_id, attempts, mode):
+        if not _is_entry_resolved(entry_id, attempts, mode, source):
             return entry_id
     return None
 
 
 def _is_session_complete(session: DictationSession, attempts: list[DictationAttempt]) -> bool:
-    return _current_entry_id(_entry_ids(session), attempts, session.mode) is None
+    return (
+        _current_entry_id(_entry_ids(session), attempts, session.mode, session.source) is None
+    )
 
 
 async def _collect_entry_ids(
@@ -230,7 +237,7 @@ async def get_next_prompt(db: AsyncSession, *, learner_id: int, session_id: int)
 
     entry_ids = _entry_ids(session)
     attempts = await _get_attempts(db, session.id)
-    current_entry_id = _current_entry_id(entry_ids, attempts, session.mode)
+    current_entry_id = _current_entry_id(entry_ids, attempts, session.mode, session.source)
     if current_entry_id is None:
         session.completed_at = datetime.now(UTC)
         await db.commit()
@@ -248,10 +255,10 @@ async def get_next_prompt(db: AsyncSession, *, learner_id: int, session_id: int)
     entries = await _load_entries(db, entry_ids)
     current = next(entry for entry in entries if entry.id == current_entry_id)
     entry_attempts = _attempts_for_entry(attempts, current_entry_id)
-    max_attempts = _max_attempts_for_mode(session.mode)
+    max_attempts = _max_attempts(session.mode, session.source)
     retries_remaining = max(0, max_attempts - len(entry_attempts))
     resolved_count = sum(
-        1 for entry_id in entry_ids if _is_entry_resolved(entry_id, attempts, session.mode)
+        1 for entry_id in entry_ids if _is_entry_resolved(entry_id, attempts, session.mode, session.source)
     )
     word_index = resolved_count + 1
 
@@ -280,7 +287,7 @@ async def get_hint(db: AsyncSession, *, learner_id: int, session_id: int) -> dic
 
     entry_ids = _entry_ids(session)
     attempts = await _get_attempts(db, session.id)
-    current_entry_id = _current_entry_id(entry_ids, attempts, session.mode)
+    current_entry_id = _current_entry_id(entry_ids, attempts, session.mode, session.source)
     if current_entry_id is None:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Session complete")
 
@@ -299,7 +306,7 @@ async def get_current_audio_path(
 
     entry_ids = _entry_ids(session)
     attempts = await _get_attempts(db, session.id)
-    current_entry_id = _current_entry_id(entry_ids, attempts, session.mode)
+    current_entry_id = _current_entry_id(entry_ids, attempts, session.mode, session.source)
     if current_entry_id is None:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Session complete")
 
@@ -327,7 +334,7 @@ async def submit_answer(
 
     entry_ids = _entry_ids(session)
     attempts = await _get_attempts(db, session.id)
-    current_entry_id = _current_entry_id(entry_ids, attempts, session.mode)
+    current_entry_id = _current_entry_id(entry_ids, attempts, session.mode, session.source)
     if current_entry_id is None:
         session.completed_at = datetime.now(UTC)
         await db.commit()
@@ -340,7 +347,7 @@ async def submit_answer(
     entries = await _load_entries(db, [current_entry_id])
     current = entries[0]
     is_correct = score_answer(current.word, answer)
-    max_attempts = _max_attempts_for_mode(session.mode)
+    max_attempts = _max_attempts(session.mode, session.source)
     attempt_number = len(entry_attempts) + 1
 
     db.add(
@@ -385,16 +392,19 @@ async def submit_answer(
     await db.refresh(session)
     await _mark_daily_challenge_if_needed(db, session=session)
 
-    current_entry_id_after = _current_entry_id(entry_ids, updated_attempts, session.mode)
+    current_entry_id_after = _current_entry_id(
+        entry_ids, updated_attempts, session.mode, session.source
+    )
     retries_remaining = 0
-    if current_entry_id_after is not None:
-        if session.mode == "choice":
-            retries_remaining = max(
-                0,
-                max_attempts - len(_attempts_for_entry(updated_attempts, current_entry_id_after)),
-            )
+    if not is_correct and reveal_word:
+        retries_remaining = 0
+    elif current_entry_id_after is not None and session.mode == "choice":
+        retries_remaining = max(
+            0,
+            max_attempts - len(_attempts_for_entry(updated_attempts, current_entry_id_after)),
+        )
 
-    return {
+    result = {
         "is_correct": is_correct,
         "expected_word": current.word if reveal_word else None,
         "syllables": None,
@@ -404,6 +414,7 @@ async def submit_answer(
         "correct_count": session.correct_count,
         "total_words": session.total_words,
     }
+    return result
 
 
 async def give_up(
@@ -426,7 +437,7 @@ async def give_up(
 
     entry_ids = _entry_ids(session)
     attempts = await _get_attempts(db, session.id)
-    current_entry_id = _current_entry_id(entry_ids, attempts, session.mode)
+    current_entry_id = _current_entry_id(entry_ids, attempts, session.mode, session.source)
     if current_entry_id is None:
         session.completed_at = datetime.now(UTC)
         await db.commit()
