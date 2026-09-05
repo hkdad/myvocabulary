@@ -84,8 +84,7 @@ async def _complete_listen_and_pick(client: AsyncClient, token: str) -> None:
     )
     assert started.status_code in (200, 201)
     session_id = started.json()["id"]
-    total_words = started.json()["total_words"]
-    for _ in range(total_words * 4):
+    for _ in range(500):
         prompt = await client.get(
             f"/api/v1/dictation/sessions/{session_id}/next",
             headers={"Authorization": f"Bearer {token}"},
@@ -94,8 +93,11 @@ async def _complete_listen_and_pick(client: AsyncClient, token: str) -> None:
             break
         data = prompt.json()
         if data.get("session_complete"):
+            return
+        choices = data.get("choices") or []
+        if not choices:
             break
-        for choice in data.get("choices", []):
+        for choice in choices:
             answer = await client.post(
                 f"/api/v1/dictation/sessions/{session_id}/answer",
                 headers={"Authorization": f"Bearer {token}"},
@@ -107,6 +109,8 @@ async def _complete_listen_and_pick(client: AsyncClient, token: str) -> None:
                 return
             if answer.json().get("is_correct"):
                 break
+            # Daily challenge allows one attempt per word — move on after a miss.
+            break
 
 
 @pytest.mark.parametrize(

@@ -1,5 +1,6 @@
 """Comprehensive dictation flow tests covering typed, choice, give-up, and audio."""
 
+import io
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -378,3 +379,42 @@ async def test_hint_only_in_choice_mode(client) -> None:
     )
     assert hint_choice.status_code == 200
     assert "Starts with" in hint_choice.json()["hint"]
+
+
+@pytest.mark.asyncio
+async def test_daily_challenge_choice_single_attempt(client) -> None:
+    parent_token = await _login(client, "parent", "parent123")
+    csv_content = "word,definition,level,category\napple,A round fruit,A2,Food\n"
+    await client.post(
+        "/api/v1/word-bank/import",
+        headers={"Authorization": f"Bearer {parent_token}"},
+        files={"file": ("bank.csv", io.BytesIO(csv_content.encode()), "text/csv")},
+    )
+
+    leo_token = await _login(client, "leo", "leo")
+    await client.get(
+        "/api/v1/loop/today",
+        headers={"Authorization": f"Bearer {leo_token}"},
+    )
+
+    start = await client.post(
+        "/api/v1/dictation/sessions",
+        headers={"Authorization": f"Bearer {leo_token}"},
+        json={"source": "daily_challenge", "mode": "choice", "max_words": 30},
+    )
+    session_id = start.json()["id"]
+    prompt = await client.get(
+        f"/api/v1/dictation/sessions/{session_id}/next",
+        headers={"Authorization": f"Bearer {leo_token}"},
+    )
+    assert prompt.json()["retries_remaining"] == 1
+
+    wrong = await client.post(
+        f"/api/v1/dictation/sessions/{session_id}/answer",
+        headers={"Authorization": f"Bearer {leo_token}"},
+        json={"answer": "zzz", "hint_used": False},
+    )
+    payload = wrong.json()
+    assert payload["is_correct"] is False
+    assert payload["retries_remaining"] == 0
+    assert payload["expected_word"] is not None
